@@ -1,0 +1,5 @@
+# media-01 drop-in dependencies
+# Primary playback backend (cross-platform: Linux, Windows, macOS)
+python-vlc
+# Audio tag reading (ID3, Vorbis comments, FLAC, AAC, etc.)
+mutagen
