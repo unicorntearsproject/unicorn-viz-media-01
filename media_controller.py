@@ -498,12 +498,6 @@ class MediaController:
             'banner_change_counter': self._banner_change_counter,
             'now_playing_banner_enabled': self._now_playing_banner_enabled,
             'now_playing_banner_hold_s': self._now_playing_banner_hold_s,
-            # Audio features (not available from local files without analysis)
-            'bpm': 0.0,
-            'energy': 0.0,
-            'danceability': 0.0,
-            'valence': 0.0,
-            'feature_confidence': 0.0,
             'tags': [],
             'genres': [],
             'tag_confidence': 0.0,
