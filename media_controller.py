@@ -326,6 +326,20 @@ class MediaController:
 
         self._backend: _VlcBackend | _SubprocessBackend | None = None
 
+        try:
+            vj = self._app.vj_api
+            vj.register_midi_actions('Media', [
+                ('media_play_pause', 'Play / pause media'),
+                ('media_next',       'Next track'),
+                ('media_prev',       'Previous track'),
+            ])
+            vj.register_midi_action_handler('media_play_pause', self.play_pause)
+            vj.register_midi_action_handler('media_next',       self.next_track)
+            vj.register_midi_action_handler('media_prev',       self.prev_track)
+        except Exception as exc:
+            import logging  # noqa: PLC0415
+            logging.getLogger(__name__).debug('media-01: MIDI registration failed: %s', exc)
+
         if not self.enabled:
             return
 
