@@ -30,6 +30,13 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+HELP_ENTRIES = [
+    ('Local Media', 'Ctrl+Alt+M', 'Play / pause'),
+    ('Local Media', 'Ctrl+Alt+N', 'Next track'),
+    ('Local Media', 'Ctrl+Alt+B', 'Previous track / restart'),
+    ('Local Media', 'Ctrl+Alt+Shift+M', 'Toggle shuffle'),
+]
+
 # Audio file extensions to scan for
 _AUDIO_EXTS: frozenset[str] = frozenset({
     '.mp3', '.flac', '.ogg', '.oga', '.opus',
