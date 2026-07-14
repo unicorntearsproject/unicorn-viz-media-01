@@ -1,6 +1,7 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
+Version: 0.5.0
 Status: active
 Last updated: 2026-06-29
 
@@ -81,3 +82,7 @@ media-01 is paused/stopped, the Spotify track (if playing) takes the band.
 ## Source
 
 Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
+
+## Changelog
+
+- **0.5.0** — initial versioned release.

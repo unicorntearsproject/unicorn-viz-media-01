@@ -19,6 +19,8 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
+__version__ = '0.5.0'
+
 import logging
 import os
 import shutil
