@@ -1,7 +1,7 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.13.0
+Version: 0.14.0
 Status: beta
 Last updated: 2026-06-29
 
@@ -85,6 +85,7 @@ Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
 
+- **0.14.0** — **Nested accordion crates** (sub-folders expand along the open path, depth-tinted headers, `crate_depth` config, default 5); session prefs persist (repeat/shuffle/crossfade/volume/mode/playlist/track); stable list scrolling — double-clicking a row now plays that row (clicks no longer recenter the list)
 - **0.13.0** — **Delete file** in the track context menu (arms a SURE?
   confirm, removes the file from disk and rescans).  The **platter ambience
   graduated to core** ("Now Spinning", fed by the now-playing hub, so the DJ

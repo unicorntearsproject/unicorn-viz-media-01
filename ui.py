@@ -108,6 +108,7 @@ class MediaDeckWindow:
         self._query = ''                  # search filter
         self._search_focused = False
         self._rows_visible = 10
+        self._scroll = 0                  # stable list scroll (no recentering)
         self._close_confirm_deadline = 0.0
         self._menu: dict | None = None      # right-click context menu
         self._menu_rects: list = []
@@ -327,6 +328,13 @@ class MediaDeckWindow:
         n = len(self._view())
         if n:
             self._sel = max(0, min(n - 1, self._sel + int(delta)))
+            # Keyboard/wheel keep the selection on screen; mouse clicks never
+            # scroll the list (so a double-click hits the row it started on).
+            vis = max(1, self._rows_visible)
+            if self._sel < self._scroll:
+                self._scroll = self._sel
+            elif self._sel >= self._scroll + vis:
+                self._scroll = self._sel - vis + 1
 
     def _click(self, x: int, y: int, clicks: int) -> None:
         with self._frame_lock:
@@ -730,34 +738,41 @@ class MediaDeckWindow:
         regions.append((rx0 + 4, sy, rx1 - 4, sy + 18, 'focus_search', None))
         list_top = sy + 26
         list_bot = h - gap
-        # Accordion crates (library mode with real subfolders).
+        # Accordion crates: nested tree along the open path (depth-tinted).
         buckets = (self._c.buckets()
                    if mode == 'library' and hasattr(self._c, 'buckets') else [])
         if len(buckets) > 1:
             hh = 18
             open_b = getattr(self._c, 'bucket', None)
-            open_pos = next((i for i, b in enumerate(buckets)
-                             if b[0] == open_b), 0)
-            for i, (bkey, blabel, bcount, excluded) in enumerate(buckets):
-                is_open = i == open_pos
-                hy = (list_top + i * hh if i <= open_pos
-                      else list_bot - (len(buckets) - i) * hh)
+            depth_fill = ((16, 20, 34, 255), (19, 23, 42, 255),
+                          (23, 24, 50, 255), (27, 24, 56, 255),
+                          (31, 25, 62, 255), (35, 26, 68, 255))
+            hy = list_top
+            for bkey, blabel, bcount, excluded, depth in buckets:
+                if hy + hh > list_bot - 40:      # keep room for some rows
+                    break
+                is_open = bkey == open_b or (bkey is None and open_b is None)
+                indent = 10 * depth
                 if is_open:
                     d.rectangle([rx0, hy, rx1, hy + hh - 2],
                                 fill=(0, 45, 90, 255), outline=_EDGE)
                 else:
                     d.rectangle([rx0, hy, rx1, hy + hh - 2],
-                                fill=(16, 20, 34, 255),
+                                fill=depth_fill[min(depth, 5)],
                                 outline=(40, 52, 78, 255))
+                on_chain = (bkey is not None and open_b is not None
+                            and (open_b == bkey
+                                 or open_b.startswith(bkey + '/')))
                 lcol = (_WARN if excluded else
-                        (_TEXT if is_open else _DIM))
+                        (_TEXT if (is_open or on_chain) else _DIM))
                 tag = '× ' if excluded else ''
-                d.text((rx0 + 6, hy + 3),
-                       f'{"▼" if is_open else "►"} {tag}{blabel[:16]} ({bcount})',
+                arrow = '▼' if (is_open or on_chain) else '►'
+                d.text((rx0 + 6 + indent, hy + 3),
+                       f'{arrow} {tag}{blabel[:16]} ({bcount})',
                        font=self._font_s, fill=lcol)
                 regions.append((rx0, hy, rx1 - 30, hy + hh - 2,
                                 'set_bucket', bkey))
-                if bkey is not None:       # exclude eye (not on ALL)
+                if bkey is not None:             # exclude eye (not on ALL)
                     ex = rx1 - 24
                     d.rectangle([ex, hy + 2, ex + 18, hy + hh - 4],
                                 outline=_WARN if excluded else _DIM)
@@ -766,16 +781,17 @@ class MediaDeckWindow:
                            fill=_WARN if excluded else _DIM)
                     regions.append((ex, hy + 2, ex + 18, hy + hh - 4,
                                     'exclude_bucket', bkey))
-            list_top = list_top + (open_pos + 1) * hh + 2
-            list_bot = list_bot - (len(buckets) - open_pos - 1) * hh
+                hy += hh
+            list_top = hy + 2
         # Rows.
         view = self._view()
         self._sel = min(self._sel, max(0, len(view) - 1))
         d.text((rx0 + 4, top + 6 - 0), '', font=self._font_s, fill=_FAINT)
         row_h = 20
         self._rows_visible = max(1, (list_bot - list_top) // row_h)
-        offset = max(0, min(max(0, len(view) - self._rows_visible),
-                            self._sel - self._rows_visible // 2))
+        self._scroll = max(0, min(max(0, len(view) - self._rows_visible),
+                                  self._scroll))
+        offset = self._scroll
         playing_name = (f'{artist} - {title}' if artist else title)
         for i in range(offset, min(len(view), offset + self._rows_visible)):
             idx, name = view[i]

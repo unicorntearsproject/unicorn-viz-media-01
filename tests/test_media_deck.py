@@ -494,3 +494,64 @@ def test_delete_file_via_menu_confirms_then_removes(tmp_path) -> None:
     assert len(ctl.library_names()) == 1              # library rescanned
     win.close_now()
     ctl.shutdown()
+
+
+def test_nested_crates_expand_along_open_path_and_fold_up(tmp_path) -> None:
+    ctl = _real_controller(tmp_path, ['crates/house/deep/x.wav',
+                                      'crates/techno/y.wav', 'loops/l.wav'])
+    tree = ctl.buckets()
+    assert [(b[0], b[4]) for b in tree] == [(None, 0), ('crates', 1),
+                                            ('loops', 1)]      # folded
+    ctl.set_bucket('crates')
+    tree = ctl.buckets()
+    assert ('crates/house', 'HOUSE', 1, False, 2) in tree      # children shown
+    assert ('crates/techno', 'TECHNO', 1, False, 2) in tree
+    ctl.set_bucket('crates/house')
+    tree = ctl.buckets()
+    assert ('crates/house/deep', 'DEEP', 1, False, 3) in tree  # grandchild
+    assert len(ctl.view_indices()) == 1                        # subtree filter
+    ctl.set_bucket('crates/house')                             # click open -> up
+    assert ctl.bucket == 'crates'
+    ctl.set_bucket('crates')
+    assert ctl.bucket is None                                  # top folds to ALL
+    ctl.toggle_exclude('crates')                               # excludes nest
+    assert len(ctl.view_indices()) == 1                        # only loops left
+    ctl.shutdown()
+
+
+def test_session_prefs_roundtrip(tmp_path) -> None:
+    ctl = _real_controller(tmp_path, ['a.wav', 'b.wav'])
+    ctl.cycle_repeat()                                         # -> one
+    ctl.toggle_crossfade()                                     # off (default on)
+    ctl.set_volume(150)
+    ctl.play_index(1)
+    ctl.shutdown()                                             # saves prefs
+
+    class _App:
+        vj_api = None
+
+    ctl2 = _mc.MediaController(_App(), {
+        'enabled': True, 'media_dir': str(tmp_path), 'shuffle': False,
+        'playlists_path': str(tmp_path / 'pl.json')})
+    assert ctl2.repeat == 'one'
+    assert ctl2.crossfade_enabled is False
+    assert ctl2.volume == 150
+    assert ctl2.library_index == 1                             # selection back
+    ctl2.shutdown()
+
+
+def test_click_then_doubleclick_hits_the_same_row(tmp_path) -> None:
+    # The list must NOT recenter on click, or the second click of a
+    # double-click lands on a different track.
+    ctl = _StubController(n=40)
+    win = _window(ctl)
+    row = win._rows[min(4, len(win._rows) - 1)]
+    win._click(*_mid(row), 1)                    # select
+    scroll_before = win._scroll
+    win._render_ui()                             # re-render between clicks
+    assert win._scroll == scroll_before          # no recentering
+    row_again = win._rows[min(4, len(win._rows) - 1)]
+    assert row_again[4] == row[4]                # same row under the cursor
+    win._click(*_mid(row_again), 2)
+    assert ('play_index', row[4]) in ctl.calls
+    win.close_now()

@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.13.0'
+__version__ = '0.14.0'
 
 import logging
 import os
@@ -482,6 +482,7 @@ class MediaController:
         self._crossfade_s = max(0.5, float(
             self._cfg.get('crossfade_ms', 3000) or 3000) / 1000.0)
         self._end_handled = False    # early-fade fired for the current track
+        self._restore_prefs()        # remembered prefs override the defaults
         # The corner platter ('Now Spinning') is core now — the checkbox
         # drives vj_api.set/toggle_now_spinning (no-op on older cores).
         self.active_playlist: str | None = None
@@ -534,6 +535,44 @@ class MediaController:
             return f'Media: restart {self._title or "track"}'
         self._advance(-1)
         return f'Media: prev → {self._title or "track"}'
+
+    def _restore_prefs(self) -> None:
+        """Re-apply the remembered session prefs (playlists-store 'prefs')."""
+        p = self._playlists.prefs if self._playlists else {}
+        if not p:
+            return
+        if p.get('repeat') in ('all', 'one', 'off'):
+            self.repeat = p['repeat']
+        if 'shuffle' in p:
+            self._shuffle = bool(p['shuffle'])
+        if 'crossfade' in p:
+            self.crossfade_enabled = bool(p['crossfade'])
+        if 'volume' in p:
+            self.set_volume(int(p['volume']))
+        if p.get('mode') in ('library', 'playlists'):
+            self.mode = p['mode']
+        if p.get('active_playlist'):
+            self.active_playlist = str(p['active_playlist'])
+        if p.get('last_track'):        # restore the selection, never autoplay
+            for i, t in enumerate(self._library):
+                if str(t.get('path', '')) == p['last_track']:
+                    self._index = i
+                    break
+        log.info('media-01: session prefs restored')
+
+    def _save_prefs(self) -> None:
+        if self._playlists is None:
+            return
+        self._playlists.prefs = {
+            'repeat': self.repeat,
+            'shuffle': self._shuffle,
+            'crossfade': self.crossfade_enabled,
+            'volume': self._volume,
+            'mode': self.mode,
+            'active_playlist': self.active_playlist,
+            'last_track': self.snapshot_path_at(self._index) or '',
+        }
+        self._playlists.save()
 
     @property
     def can_crossfade(self) -> bool:
@@ -698,20 +737,50 @@ class MediaController:
     # -- active view: crates / sort / playlists --------------------------------
 
     def buckets(self) -> list[tuple]:
-        """Accordion crates: (key, label, count, excluded); ALL first."""
-        counts: dict[str, int] = {}
-        for t in self._library:
-            b = str(t.get('bucket', '') or '')
-            if b:
-                counts[b] = counts.get(b, 0) + 1
+        """Accordion crate tree rows: (key, label, count, excluded, depth).
+
+        ALL first (depth 0), then top-level crates; the crates along the open
+        path expand inline (their children indented one depth deeper), classic
+        accordion — everything else stays folded.
+        """
+        paths = [str(t.get('bucket', '') or '') for t in self._library]
         exc = self._playlists.excluded if self._playlists else set()
-        visible_total = sum(1 for t in self._library
-                            if str(t.get('bucket', '') or '') not in exc)
-        out = [(None, 'ALL', visible_total, False)]
-        out += [(b, b.upper(), n, b in exc) for b, n in sorted(counts.items())]
-        return out
+
+        def count_under(prefix: str) -> int:
+            return sum(1 for b in paths
+                       if self._under(b, prefix) and not self._hidden(b))
+
+        visible_total = sum(1 for b in paths if not self._hidden(b))
+        rows: list[tuple] = [(None, 'ALL', visible_total, False, 0)]
+        open_parts = self.bucket.split('/') if self.bucket else []
+
+        def children(prefix_parts: list[str]) -> list[str]:
+            depth = len(prefix_parts)
+            prefix = '/'.join(prefix_parts)
+            names = set()
+            for b in paths:
+                parts = b.split('/') if b else []
+                if len(parts) > depth and (not prefix
+                                           or self._under(b, prefix)):
+                    names.add(parts[depth])
+            return sorted(names)
+
+        def emit(prefix_parts: list[str], depth: int) -> None:
+            for name in children(prefix_parts):
+                path = '/'.join([*prefix_parts, name])
+                rows.append((path, name.upper(), count_under(path),
+                             path in exc, depth))
+                # Expand only along the open chain (one branch at a time).
+                if open_parts[:depth] == [*prefix_parts, name][:depth]                         and len(open_parts) >= depth                         and open_parts[depth - 1] == name:
+                    emit([*prefix_parts, name], depth + 1)
+
+        emit([], 1)
+        return rows
 
     def set_bucket(self, name: str | None) -> None:
+        """Open a crate; clicking the already-open crate folds it up a level."""
+        if name and name == self.bucket:
+            name = name.rsplit('/', 1)[0] if '/' in name else None
         self.bucket = name or None
         if self._playlists:
             self._playlists.set_last_bucket(self.bucket)
@@ -753,11 +822,11 @@ class MediaController:
             return [by_path[p] for p in
                     self._playlists.tracks(self.active_playlist)
                     if p in by_path]
-        exc = self._playlists.excluded if self._playlists else set()
         idx = [i for i, t in enumerate(self._library)
-               if str(t.get('bucket', '') or '') not in exc
+               if not self._hidden(str(t.get('bucket', '') or ''))
                and (self.bucket is None
-                    or str(t.get('bucket', '') or '') == self.bucket)]
+                    or self._under(str(t.get('bucket', '') or ''),
+                                   self.bucket))]
         if self._sort_key:
             def _key(i: int):
                 t = self._library[i]
@@ -767,14 +836,27 @@ class MediaController:
         return idx
 
     def rescan_library(self) -> None:
-        """(Re)walk the media dir and retag each track's crate."""
+        """(Re)walk the media dir and tag each track's crate *path*.
+
+        Crates nest: a track's bucket is its directory path relative to the
+        media dir, '/'-joined, truncated to ``crate_depth`` (default 5).
+        """
+        depth = max(1, int(self._cfg.get('crate_depth', 5) or 5))
         self._library = _scan_library(self._media_dir)
-        for t in self._library:            # crate = top-level subfolder
+        for t in self._library:
             try:
                 rel = Path(t['path']).relative_to(self._media_dir)
-                t['bucket'] = rel.parts[0] if len(rel.parts) > 1 else ''
+                t['bucket'] = '/'.join(rel.parts[:-1][:depth])
             except Exception:
                 t['bucket'] = ''
+
+    @staticmethod
+    def _under(bucket: str, prefix: str) -> bool:
+        return bucket == prefix or bucket.startswith(prefix + '/')
+
+    def _hidden(self, bucket: str) -> bool:
+        exc = self._playlists.excluded if self._playlists else set()
+        return any(self._under(bucket, e) for e in exc)
 
     def delete_track(self, index: int) -> str:
         """Delete library row *index*'s FILE from disk (context menu, after a
@@ -916,6 +998,10 @@ class MediaController:
             except Exception:
                 pass
         self.close_window()
+        try:
+            self._save_prefs()
+        except Exception:
+            pass
         if self._backend is not None:
             self._backend.shutdown()
             self._backend = None

@@ -27,8 +27,9 @@ class MediaPlaylists:
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
         self._lists: dict[str, list[str]] = {}
-        self.excluded: set[str] = set()      # crate names hidden everywhere
+        self.excluded: set[str] = set()      # crate paths hidden everywhere
         self.last_bucket: str | None = None  # last open crate (None = ALL)
+        self.prefs: dict = {}                # repeat/shuffle/volume/mode/...
         self._load()
 
     # -- playlists -------------------------------------------------------------
@@ -114,6 +115,7 @@ class MediaPlaylists:
             self.excluded = {str(b) for b in (data.get('excluded') or [])}
             lb = data.get('last_bucket')
             self.last_bucket = str(lb) if lb else None
+            self.prefs = dict(data.get('prefs') or {})
             log.info('media playlists: %d list(s), %d crate(s) excluded',
                      len(self._lists), len(self.excluded))
         except Exception as exc:
@@ -123,7 +125,8 @@ class MediaPlaylists:
         payload = {'_meta': {'schema': SCHEMA, 'schema_version': SCHEMA_VERSION},
                    'playlists': self._lists,
                    'excluded': sorted(self.excluded),
-                   'last_bucket': self.last_bucket}
+                   'last_bucket': self.last_bucket,
+                   'prefs': dict(self.prefs)}
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(dir=str(self._path.parent),
