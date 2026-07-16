@@ -277,10 +277,26 @@ class MediaDeckWindow:
         if sym == sdl2.SDLK_SPACE:
             self._c.play_pause()
             return
+        if sym == sdl2.SDLK_f and not (mod & (sdl2.KMOD_CTRL | sdl2.KMOD_ALT
+                                              | sdl2.KMOD_SHIFT)):
+            self._toggle_fullscreen()      # F: this window, not the visualizer
+            return
         if self._vj is not None:              # everything else: global hotkeys
             fwd = getattr(self._vj, 'dispatch_subwindow_keydown', None)
             if callable(fwd):
                 fwd(sym, mod, repeat)
+
+    def _toggle_fullscreen(self) -> None:
+        """Borderless-desktop fullscreen toggle for the Media Deck window."""
+        try:
+            self._fullscreen = not getattr(self, '_fullscreen', False)
+            flag = sdl2.SDL_WINDOW_FULLSCREEN_DESKTOP if self._fullscreen else 0
+            sdl2.SDL_SetWindowFullscreen(self._window, flag)
+            # Drawable size changes land via the RESIZED window event.
+            log.info('media-deck: fullscreen %s',
+                     'on' if self._fullscreen else 'off')
+        except Exception as exc:
+            log.warning('media-deck: fullscreen toggle failed: %s', exc)
 
     def _search_key(self, sym: int) -> bool:
         if sym in (sdl2.SDLK_RETURN, sdl2.SDLK_KP_ENTER, sdl2.SDLK_ESCAPE):

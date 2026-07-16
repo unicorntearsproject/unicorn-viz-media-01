@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.9.1'
+__version__ = '0.9.2'
 
 import logging
 import os
@@ -564,6 +564,12 @@ class MediaController:
     @property
     def is_window_open(self) -> bool:
         return self._window is not None and self._window.is_open
+
+    @property
+    def is_open(self) -> bool:
+        """Subsystem cursor protocol: the app shows the mouse cursor while any
+        subsystem window is open (SDL_ShowCursor is process-global)."""
+        return self.is_window_open
 
     def open_window(self) -> None:
         if not self.enabled or self._window is not None:

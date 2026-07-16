@@ -1,7 +1,7 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.9.1
+Version: 0.9.2
 Status: beta
 Last updated: 2026-06-29
 
@@ -84,6 +84,10 @@ media-01 is paused/stopped, the Spotify track (if playing) takes the band.
 Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
+
+- **0.9.2** — The mouse cursor now shows over the Media Deck (subsystem
+  `is_open` cursor protocol) and **F toggles the window fullscreen**
+  (borderless desktop) instead of falling through to the visualizer.
 
 - **0.9.1** — The Media Deck is a **remote control, not the player**: closing
   the window keeps the music playing (new default), with an in-window

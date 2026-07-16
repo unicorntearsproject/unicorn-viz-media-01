@@ -302,3 +302,16 @@ def test_keep_toggle_region_drives_the_controller() -> None:
     win._click(*_mid(_region(win, 'keep_toggle')), 1)
     assert 'keep' in ctl.calls
     win.close_now()
+
+
+def test_f_key_toggles_window_fullscreen_not_forwarded(monkeypatch) -> None:
+    ctl = _StubController()
+    win = _window(ctl)
+    calls = []
+    monkeypatch.setattr(_ui.sdl2, 'SDL_SetWindowFullscreen',
+                        lambda w, f: calls.append(f))
+    win._on_key(sdl2.SDLK_f, 0, False)
+    assert calls == [sdl2.SDL_WINDOW_FULLSCREEN_DESKTOP]
+    win._on_key(sdl2.SDLK_f, 0, False)
+    assert calls[-1] == 0                            # toggles back off
+    win.close_now()
