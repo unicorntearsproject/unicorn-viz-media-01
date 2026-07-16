@@ -343,7 +343,9 @@ class MediaDeckWindow:
             row = next((r for r in self._rows
                         if r[0] <= x <= r[2] and r[1] <= y <= r[3]), None)
         self._search_focused = False
-        if row is not None:
+        # Regions win over rows: per-row controls (the ♥) and open flyouts
+        # sit on top of the track list.
+        if row is not None and hit is None:
             self._sel = row[4]
             if clicks >= 2:
                 view = self._view()
@@ -381,6 +383,8 @@ class MediaDeckWindow:
                 self._sel = 0
             elif action == 'exclude_bucket':
                 self._c.toggle_exclude(payload)
+            elif action == 'fav_toggle':
+                self._c.toggle_favorite(payload)
             elif action == 'toggle_sort':
                 self._sort_open = not self._sort_open
             elif action == 'set_sort':
@@ -441,6 +445,9 @@ class MediaDeckWindow:
                       ('Move down', 'pl_move', (self._sel, 1))]
         elif pls is not None:
             items.append(('Add to playlist »', 'add_menu', idx))
+        if hasattr(self._c, 'is_favorite'):
+            fav = bool(self._c.is_favorite(idx))
+            items.append(('Unfavorite ♥' if fav else 'Favorite ♥', 'fav', idx))
         items.append(('Delete file…', 'del_arm', idx))
         self._menu = {'x': x, 'y': y, 'name': name, 'items': items}
 
@@ -476,6 +483,9 @@ class MediaDeckWindow:
             elif action == 'pl_remove':
                 if pls is not None and self._c.active_playlist:
                     pls.remove(self._c.active_playlist, payload)
+                self._menu = None
+            elif action == 'fav':
+                self._c.toggle_favorite(payload)
                 self._menu = None
             elif action == 'del_arm':      # arm: the next click really deletes
                 menu['items'] = [('SURE? DELETE FILE', 'del_do', payload),
@@ -637,51 +647,36 @@ class MediaDeckWindow:
             d.text((bx, cy + 24), f'{vol}%', font=self._font_s, fill=_FAINT)
             regions.append((bx, cy + 6, vx1, cy + 28, 'volume', (bx, vx1)))
 
-        # Keep-playing-on-close checkbox (the window is a remote control —
-        # by default the music continues when you dismiss it).
-        keep = bool(snap.get('keep_playing_on_close', True))
-        kb_y = h - gap - 22
-        d.rectangle([lx0 + 6, kb_y, lx0 + 18, kb_y + 12],
-                    fill=_HOT if keep else (0, 0, 0, 90),
-                    outline=_HOT if keep else _DIM)
-        if keep:
-            d.line([lx0 + 8, kb_y + 6, lx0 + 11, kb_y + 9], fill=(4, 18, 26, 255))
-            d.line([lx0 + 11, kb_y + 9, lx0 + 16, kb_y + 3], fill=(4, 18, 26, 255))
-        d.text((lx0 + 24, kb_y + 1), 'keep playing when window is closed',
-               font=self._font_s, fill=_TEXT if keep else _DIM)
-        regions.append((lx0 + 6, kb_y - 3, lx0 + 240, kb_y + 15,
-                        'keep_toggle', None))
-        # Crossfade checkbox (VLC backend: true overlapping fade; dim when
-        # the subprocess fallback can't do it).
-        can_xf = bool(snap.get('can_crossfade', False))
-        xf = bool(snap.get('crossfade', False)) and can_xf
-        xf_y = kb_y - 40
-        xcol = (_HOT if xf else _DIM) if can_xf else _FAINT
-        d.rectangle([lx0 + 6, xf_y, lx0 + 18, xf_y + 12],
-                    fill=_HOT if xf else (0, 0, 0, 90), outline=xcol)
-        if xf:
-            d.line([lx0 + 8, xf_y + 6, lx0 + 11, xf_y + 9], fill=(4, 18, 26, 255))
-            d.line([lx0 + 11, xf_y + 9, lx0 + 16, xf_y + 3], fill=(4, 18, 26, 255))
-        d.text((lx0 + 24, xf_y + 1),
-               'crossfade between tracks' + ('' if can_xf else ' (needs VLC)'),
-               font=self._font_s, fill=_TEXT if xf else xcol)
-        if can_xf:
-            regions.append((lx0 + 6, xf_y - 3, lx0 + 240, xf_y + 15,
-                            'crossfade_toggle', None))
+        # Options checkboxes (bottom-left stack).  One helper so every box has
+        # the same generous full-row hit target — small/adjacent click regions
+        # made these feel unreliable.
+        def _checkbox(y: int, label: str, on: bool, action: str,
+                      enabled: bool = True) -> None:
+            col = (_HOT if on else _DIM) if enabled else _FAINT
+            d.rectangle([lx0 + 6, y, lx0 + 20, y + 14],
+                        fill=_HOT if on else (0, 0, 0, 90), outline=col)
+            if on:
+                d.line([lx0 + 9, y + 7, lx0 + 12, y + 10], fill=(4, 18, 26, 255))
+                d.line([lx0 + 12, y + 10, lx0 + 17, y + 4], fill=(4, 18, 26, 255))
+            d.text((lx0 + 27, y + 2), label, font=self._font_s,
+                   fill=(_TEXT if on else _DIM) if enabled else _FAINT)
+            if enabled:
+                regions.append((lx0 + 2, y - 2, lx0 + 31 + len(label) * 6,
+                                y + 16, action, None))
 
-        # Corner-platter ambience checkbox (main-output overlay).
-        amb = bool(snap.get('ambience', True))
-        ab_y = kb_y - 20
-        d.rectangle([lx0 + 6, ab_y, lx0 + 18, ab_y + 12],
-                    fill=_HOT if amb else (0, 0, 0, 90),
-                    outline=_HOT if amb else _DIM)
-        if amb:
-            d.line([lx0 + 8, ab_y + 6, lx0 + 11, ab_y + 9], fill=(4, 18, 26, 255))
-            d.line([lx0 + 11, ab_y + 9, lx0 + 16, ab_y + 3], fill=(4, 18, 26, 255))
-        d.text((lx0 + 24, ab_y + 1), 'corner platter on the visualizer',
-               font=self._font_s, fill=_TEXT if amb else _DIM)
-        regions.append((lx0 + 6, ab_y - 3, lx0 + 240, ab_y + 15,
-                        'ambience_toggle', None))
+        kb_y = h - gap - 22
+        # Never let the stack ride up into the transport row at small heights.
+        cb_top = max(kb_y - 48, cy + th + 8)
+        cb_step = max(17, (kb_y - cb_top) // 2)
+        can_xf = bool(snap.get('can_crossfade', False))
+        _checkbox(cb_top,
+                  'crossfade between tracks' + ('' if can_xf else ' (needs VLC)'),
+                  bool(snap.get('crossfade', False)) and can_xf,
+                  'crossfade_toggle', enabled=can_xf)
+        _checkbox(cb_top + cb_step, 'corner platter on the visualizer',
+                  bool(snap.get('ambience', True)), 'ambience_toggle')
+        _checkbox(cb_top + 2 * cb_step, 'keep playing when window is closed',
+                  bool(snap.get('keep_playing_on_close', True)), 'keep_toggle')
 
         # Library pane (right column): LIBRARY | PLAYLISTS tabs, accordion
         # crates with per-crate exclude toggles, sort flyout, playlist picker.
@@ -691,7 +686,8 @@ class MediaDeckWindow:
         pls = getattr(self._c, 'playlists', None)
         ty = top + 6
         tabx = rx0 + 4
-        for label, m in (('LIBRARY', 'library'), ('PLAYLISTS', 'playlists')):
+        for label, m in (('LIBRARY', 'library'), ('PLAYLISTS', 'playlists'),
+                         ('♥ FAVS', 'favorites')):
             on = mode == m
             tw2 = len(label) * 6 + 16
             if on:
@@ -703,8 +699,8 @@ class MediaDeckWindow:
                    fill=_TEXT if on else _DIM)
             regions.append((tabx, ty, tabx + tw2, ty + 18, 'set_mode', m))
             tabx += tw2 + 4
-        # Sort flyout icon at the right edge of the tab row (library mode).
-        if mode == 'library':
+        # Sort flyout icon at the right edge of the tab row.
+        if mode in ('library', 'favorites'):
             sox = rx1 - 26
             skey = getattr(self._c, 'sort', (None, True))[0]
             scol = _HOT if (self._sort_open or skey) else _DIM
@@ -803,10 +799,20 @@ class MediaDeckWindow:
                             fill=(0, 45, 90, 255))
                 d.text((rx0 + 2, ry), '►', font=self._font_s, fill=_HOT)
             ncol = _WAVE_HI if is_live else (_TEXT if is_sel else _DIM)
-            maxr = max(8, (rx1 - rx0 - 20) // 6)
+            maxr = max(8, (rx1 - rx0 - 34) // 6)
             label = name if len(name) <= maxr else name[:maxr - 1] + '…'
             d.text((rx0 + 14, ry), label, font=self._font_s, fill=ncol)
+            fav = bool(getattr(self._c, 'is_favorite', lambda _i: False)(idx))
+            d.text((rx1 - 16, ry), '♥', font=self._font_s,
+                   fill=(255, 80, 160, 255) if fav else (40, 50, 72, 255))
+            regions.append((rx1 - 20, ry - 1, rx1 - 4, ry + row_h - 3,
+                            'fav_toggle', idx))
             rows.append((rx0, ry - 1, rx1, ry + row_h - 3, i))
+        if not view and mode == 'favorites':
+            d.text((rx0 + 14, list_top + 8), 'no favorites yet —',
+                   font=self._font_s, fill=_FAINT)
+            d.text((rx0 + 14, list_top + 22), 'click a track\u2019s ♥ to heart it',
+                   font=self._font_s, fill=_FAINT)
         if len(view) > self._rows_visible:
             track_h = list_bot - list_top
             bar_h = max(12, int(track_h * self._rows_visible / len(view)))
@@ -816,7 +822,7 @@ class MediaDeckWindow:
             d.rectangle([rx1 - 2, bar_y, rx1, bar_y + bar_h], fill=_DIM)
         # Flyouts + context menu paint over the rows.
         menu_rects: list = []
-        if self._sort_open and mode == 'library':
+        if self._sort_open and mode in ('library', 'favorites'):
             opts = (('Artist ↑', 'artist', True), ('Artist ↓', 'artist', False),
                     ('Title ↑', 'title', True), ('Title ↓', 'title', False),
                     ('Scan order', None, True))

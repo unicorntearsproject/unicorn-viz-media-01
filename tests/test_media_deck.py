@@ -28,6 +28,7 @@ def _load(name: str):
 
 _ui = _load('ui')
 _mc = _load('media_controller')
+_pl = _load('playlists')
 
 
 class _FakeGLWindow:
@@ -555,3 +556,32 @@ def test_click_then_doubleclick_hits_the_same_row(tmp_path) -> None:
     win._click(*_mid(row_again), 2)
     assert ('play_index', row[4]) in ctl.calls
     win.close_now()
+
+
+def test_favorites_toggle_view_and_persistence(tmp_path) -> None:
+    ctl = _real_controller(tmp_path, ['crates/a.wav', 'crates/b.wav',
+                                      'loops/l.wav'])
+    names = ctl.library_names()
+    ib = next(i for i, n in enumerate(names) if 'b' in n and 'crates' in
+              str(ctl.snapshot_path_at(i)))
+    il = next(i for i, n in enumerate(names)
+              if 'loops' in str(ctl.snapshot_path_at(i)))
+    assert ctl.is_favorite(ib) is False
+    assert ctl.toggle_favorite(ib).startswith('Media: ♥')
+    ctl.toggle_favorite(il)
+    assert ctl.is_favorite(ib) and ctl.is_favorite(il)
+
+    # Favorites view lists exactly the hearted tracks (excludes don't apply).
+    ctl.toggle_exclude('loops')
+    ctl.set_mode('favorites')
+    fav_paths = {ctl.snapshot_path_at(i) for i in ctl.view_indices()}
+    assert fav_paths == {ctl.snapshot_path_at(ib), ctl.snapshot_path_at(il)}
+
+    # Unheart drops it from the view; favorites survive a store reload.
+    ctl.toggle_favorite(il)
+    assert {ctl.snapshot_path_at(i) for i in ctl.view_indices()} == {
+        ctl.snapshot_path_at(ib)}
+    ctl._save_prefs()
+    reloaded = _pl.MediaPlaylists(tmp_path / 'pl.json')
+    assert reloaded.favorites == {ctl.snapshot_path_at(ib)}
+    assert reloaded.prefs.get('mode') == 'favorites'

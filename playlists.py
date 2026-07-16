@@ -30,6 +30,7 @@ class MediaPlaylists:
         self.excluded: set[str] = set()      # crate paths hidden everywhere
         self.last_bucket: str | None = None  # last open crate (None = ALL)
         self.prefs: dict = {}                # repeat/shuffle/volume/mode/...
+        self.favorites: set[str] = set()     # favorited track paths
         self._load()
 
     # -- playlists -------------------------------------------------------------
@@ -98,6 +99,15 @@ class MediaPlaylists:
             self.last_bucket = bucket
             self.save()
 
+    def toggle_favorite(self, path: str) -> bool:
+        """Flip a track's favorite state; returns the new state."""
+        if path in self.favorites:
+            self.favorites.discard(path)
+        else:
+            self.favorites.add(path)
+        self.save()
+        return path in self.favorites
+
     # -- persistence -------------------------------------------------------------
 
     def _load(self) -> None:
@@ -116,6 +126,7 @@ class MediaPlaylists:
             lb = data.get('last_bucket')
             self.last_bucket = str(lb) if lb else None
             self.prefs = dict(data.get('prefs') or {})
+            self.favorites = {str(f) for f in (data.get('favorites') or [])}
             log.info('media playlists: %d list(s), %d crate(s) excluded',
                      len(self._lists), len(self.excluded))
         except Exception as exc:
@@ -126,7 +137,8 @@ class MediaPlaylists:
                    'playlists': self._lists,
                    'excluded': sorted(self.excluded),
                    'last_bucket': self.last_bucket,
-                   'prefs': dict(self.prefs)}
+                   'prefs': dict(self.prefs),
+                   'favorites': sorted(self.favorites)}
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(dir=str(self._path.parent),

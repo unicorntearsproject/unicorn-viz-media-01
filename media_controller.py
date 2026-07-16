@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.14.0'
+__version__ = '0.15.0'
 
 import logging
 import os
@@ -125,8 +125,9 @@ class _VlcBackend:
         self._active = 0
         self._volume = max(0, min(200, volume))
         self._fade: list | None = None    # [elapsed_s, fade_s, outgoing idx]
-        for p in self._players:
-            p.audio_set_volume(self._volume)
+        # Do NOT set volume here: libvlc's PipeWire output module can
+        # segfault when audio_set_volume runs on a player that has never
+        # had media/an audio output.  Volume is applied in play().
 
     @property
     def _player(self):
@@ -137,6 +138,7 @@ class _VlcBackend:
         media = self._instance.media_new(str(path))
         self._player.set_media(media)
         self._player.play()
+        self._player.audio_set_volume(self._volume)
 
     can_crossfade = True
 
@@ -151,8 +153,8 @@ class _VlcBackend:
             out_idx = self._active
             inc = self._players[1 - out_idx]
             inc.set_media(self._instance.media_new(str(path)))
-            inc.audio_set_volume(0)
             inc.play()
+            inc.audio_set_volume(0)
             self._end_fade(hard=True)     # collapse any fade already running
             self._active = 1 - out_idx
             self._fade = [0.0, max(0.2, float(fade_s)), out_idx]
@@ -214,7 +216,9 @@ class _VlcBackend:
 
     def set_volume(self, volume: int) -> None:
         self._volume = max(0, min(200, volume))
-        if self._fade is None:            # mid-fade, tick() re-applies the ramp
+        # Mid-fade tick() re-applies the ramp; a media-less player never gets
+        # a volume call (libvlc PipeWire aout segfaults without an output).
+        if self._fade is None and self._player.get_media() is not None:
             self._player.audio_set_volume(self._volume)
 
     can_seek = True
@@ -549,7 +553,7 @@ class MediaController:
             self.crossfade_enabled = bool(p['crossfade'])
         if 'volume' in p:
             self.set_volume(int(p['volume']))
-        if p.get('mode') in ('library', 'playlists'):
+        if p.get('mode') in ('library', 'playlists', 'favorites'):
             self.mode = p['mode']
         if p.get('active_playlist'):
             self.active_playlist = str(p['active_playlist'])
@@ -803,12 +807,26 @@ class MediaController:
         return self._sort_key, self._sort_asc
 
     def set_mode(self, mode: str) -> None:
-        if mode in ('library', 'playlists'):
+        if mode in ('library', 'playlists', 'favorites'):
             self.mode = mode
             if (mode == 'playlists' and self._playlists
                     and self.active_playlist not in self._playlists.names()):
                 names = self._playlists.names()
                 self.active_playlist = names[0] if names else None
+
+    def toggle_favorite(self, index: int) -> str:
+        """Heart a library row: flips membership in the persisted favorites."""
+        path = self.snapshot_path_at(index)
+        if not path or self._playlists is None:
+            return 'Media: nothing to favorite'
+        fav = self._playlists.toggle_favorite(path)
+        name = Path(path).stem
+        return (f'Media: ♥ {name}' if fav else f'Media: unhearted {name}')
+
+    def is_favorite(self, index: int) -> bool:
+        path = self.snapshot_path_at(index)
+        favs = self._playlists.favorites if self._playlists else set()
+        return bool(path) and path in favs
 
     @property
     def playlists(self):
@@ -822,11 +840,17 @@ class MediaController:
             return [by_path[p] for p in
                     self._playlists.tracks(self.active_playlist)
                     if p in by_path]
-        idx = [i for i, t in enumerate(self._library)
-               if not self._hidden(str(t.get('bucket', '') or ''))
-               and (self.bucket is None
-                    or self._under(str(t.get('bucket', '') or ''),
-                                   self.bucket))]
+        if self.mode == 'favorites':
+            # Explicit picks: crate excludes don't apply, sort still does.
+            favs = self._playlists.favorites if self._playlists else set()
+            idx = [i for i, t in enumerate(self._library)
+                   if str(t.get('path', '')) in favs]
+        else:
+            idx = [i for i, t in enumerate(self._library)
+                   if not self._hidden(str(t.get('bucket', '') or ''))
+                   and (self.bucket is None
+                        or self._under(str(t.get('bucket', '') or ''),
+                                       self.bucket))]
         if self._sort_key:
             def _key(i: int):
                 t = self._library[i]
