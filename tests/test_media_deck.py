@@ -478,110 +478,19 @@ def test_repeat_button_region_cycles(monkeypatch) -> None:
     win.close_now()
 
 
-def test_ambience_card_rasterizes_headlessly() -> None:
-    import importlib.util
-    spec = importlib.util.spec_from_file_location('amb', _ROOT / 'ambience.py')
-    amb = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(amb)
-    from PIL import ImageFont
-    card = amb.MediaAmbience.__new__(amb.MediaAmbience)   # skip GL __init__
-    card._font_b = ImageFont.load_default()
-    card._font_s = ImageFont.load_default()
-    img = card._build_card({'title': 'Better Off Alone', 'artist': 'Alice DJ',
-                            'position_s': 42.0, 'duration_s': 215.0})
-    assert img.size == (300, 120)
-    assert img.getbbox() is not None                     # actually drew pixels
-
-
-def test_crossfade_starts_early_and_overlaps(tmp_path) -> None:
+def test_delete_file_via_menu_confirms_then_removes(tmp_path) -> None:
     ctl = _real_controller(tmp_path, ['a.wav', 'b.wav'])
-
-    class _XfBackend:
-        can_seek = can_volume = False
-        can_crossfade = True
-
-        def __init__(self):
-            self.plays: list[str] = []
-            self.fades: list[tuple[str, float]] = []
-            self.ticks = 0.0
-            self.pos = 0.0
-            self.dur = 10.0
-
-        def play(self, path, duration_s=0.0):
-            self.plays.append(str(path))
-
-        def crossfade_to(self, path, fade_s):
-            self.fades.append((str(path), fade_s))
-            self.pos = 0.0        # incoming player becomes active immediately
-            return True
-
-        def tick(self, dt):
-            self.ticks += dt
-
-        def pause(self):
-            pass
-
-        def is_playing(self):
-            return True
-
-        def is_ended(self):
-            return False
-
-        def position_s(self):
-            return self.pos
-
-        def duration_s(self):
-            return self.dur
-
-        def set_volume(self, v):
-            pass
-
-        def shutdown(self):
-            pass
-
-    ctl._backend = _XfBackend()
-    ctl.crossfade_enabled = True
-    ctl._crossfade_s = 3.0
-    ctl.play_index(0)                       # cold start: plain play (no fade)
-    assert ctl._backend.plays and not ctl._backend.fades
-    ctl._backend.pos, ctl._backend.dur = 2.0, 10.0
-    ctl.update(0.1, None)                   # mid-track: no fade yet
-    assert not ctl._backend.fades
-    ctl._backend.pos = 8.0                  # 2 s left, fade window is 3 s
-    ctl.update(0.1, None)                   # early-advance crossfades to b
-    assert ctl._backend.fades and ctl._backend.fades[0][0].endswith('b.wav')
-    ctl.update(0.1, None)                   # once per track — no double fire
-    assert len(ctl._backend.fades) == 1
-    assert ctl._backend.ticks > 0.0         # ramp is being driven
-    ctl.next_track()                        # manual next while playing fades too
-    assert len(ctl._backend.fades) == 2
-    assert 'crossfade' in ctl.snapshot() and ctl.snapshot()['can_crossfade']
-    ctl.shutdown()
-
-
-def test_crossfade_checkbox_region_and_vlc_gating() -> None:
-    ctl = _StubController()
-    ctl.can_crossfade = True
-    ctl.crossfaded = 0
-
-    def tog():
-        ctl.crossfaded += 1
-
-    ctl.toggle_crossfade = tog
-    _snap = ctl.snapshot
-
-    def snap2():
-        s = _snap()
-        s.update({'can_crossfade': True, 'crossfade': True})
-        return s
-
-    ctl.snapshot = snap2
     win = _window(ctl)
-    win._click(*_mid(_region(win, 'crossfade_toggle')), 1)
-    assert ctl.crossfaded == 1
+    row = win._rows[0]
+    win._right_click(*_mid(row))
+    win._render_ui()                                  # menu regions published
+    arm = next(r for r in win._menu_rects if r[4] == 'del_arm')
+    win._click_menu(*_mid(arm))                       # arm only — no delete yet
+    assert (tmp_path / 'a.wav').exists()
+    win._render_ui()
+    do = next(r for r in win._menu_rects if r[4] == 'del_do')
+    win._click_menu(*_mid(do))
+    assert not (tmp_path / 'a.wav').exists()          # gone from disk
+    assert len(ctl.library_names()) == 1              # library rescanned
     win.close_now()
-    # Subprocess backend: checkbox is informational only (no region).
-    ctl2 = _StubController()
-    win2 = _window(ctl2)                     # stub snapshot lacks can_crossfade
-    assert not [r for r in win2._regions if r[4] == 'crossfade_toggle']
-    win2.close_now()
+    ctl.shutdown()

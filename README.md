@@ -1,7 +1,7 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.12.0
+Version: 0.13.0
 Status: beta
 Last updated: 2026-06-29
 
@@ -84,6 +84,12 @@ media-01 is paused/stopped, the Spotify track (if playing) takes the band.
 Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
+
+- **0.13.0** — **Delete file** in the track context menu (arms a SURE?
+  confirm, removes the file from disk and rescans).  The **platter ambience
+  graduated to core** ("Now Spinning", fed by the now-playing hub, so the DJ
+  mixer and Spotify announce on it too) — the Deck checkbox now drives
+  `vj_api.toggle_now_spinning`; the private overlay code is gone.
 
 - **0.12.0** — **Real crossfade.** The long-reserved `crossfade_ms` finally
   does something: on the VLC backend the player now runs **two players** and

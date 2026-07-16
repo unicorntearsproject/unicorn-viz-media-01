@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.12.0'
+__version__ = '0.13.0'
 
 import logging
 import os
@@ -426,13 +426,7 @@ class MediaController:
         if not self.enabled:
             return
 
-        self._library = _scan_library(self._media_dir)
-        for t in self._library:            # crate = top-level subfolder
-            try:
-                rel = Path(t['path']).relative_to(self._media_dir)
-                t['bucket'] = rel.parts[0] if len(rel.parts) > 1 else ''
-            except Exception:
-                t['bucket'] = ''
+        self.rescan_library()
         if not self._library:
             log.warning(
                 'media-01: no audio files found in %s; check media_dir in config',
@@ -488,9 +482,8 @@ class MediaController:
         self._crossfade_s = max(0.5, float(
             self._cfg.get('crossfade_ms', 3000) or 3000) / 1000.0)
         self._end_handled = False    # early-fade fired for the current track
-        # Corner platter ambience on the main output (display-only overlay).
-        self.ambience_enabled = bool(self._cfg.get('ambience', True))
-        self._ambience = None
+        # The corner platter ('Now Spinning') is core now — the checkbox
+        # drives vj_api.set/toggle_now_spinning (no-op on older cores).
         self.active_playlist: str | None = None
         self.bucket: str | None = (self._playlists.last_bucket
                                    if self._playlists else None)
@@ -773,6 +766,31 @@ class MediaController:
             idx.sort(key=_key, reverse=not self._sort_asc)
         return idx
 
+    def rescan_library(self) -> None:
+        """(Re)walk the media dir and retag each track's crate."""
+        self._library = _scan_library(self._media_dir)
+        for t in self._library:            # crate = top-level subfolder
+            try:
+                rel = Path(t['path']).relative_to(self._media_dir)
+                t['bucket'] = rel.parts[0] if len(rel.parts) > 1 else ''
+            except Exception:
+                t['bucket'] = ''
+
+    def delete_track(self, index: int) -> str:
+        """Delete library row *index*'s FILE from disk (context menu, after a
+        SURE? confirm in the UI) and rescan.  A playing track keeps playing —
+        the backend holds its own handle."""
+        path = self.snapshot_path_at(index)
+        if not path:
+            return 'Media: nothing to delete'
+        try:
+            Path(path).unlink(missing_ok=True)
+            log.warning('media-01: deleted file %s', path)
+        except Exception as exc:
+            return f'Media: delete failed ({exc})'
+        self.rescan_library()
+        return f'Media: deleted {Path(path).name}'
+
     def snapshot_path_at(self, index: int) -> str | None:
         """Absolute path of library row *index* (playlist membership)."""
         if 0 <= index < len(self._library):
@@ -796,52 +814,17 @@ class MediaController:
         self._start_track(view[pos])
 
     def toggle_ambience(self) -> str:
-        """Checkbox: the corner 'now spinning' platter on the main output."""
-        self.ambience_enabled = not self.ambience_enabled
-        return ('Media: platter ambience on' if self.ambience_enabled
-                else 'Media: platter ambience off')
+        """Checkbox: the core Now Spinning corner platter on the main output."""
+        vj = getattr(self._app, 'vj_api', None)
+        if vj is not None and hasattr(vj, 'toggle_now_spinning'):
+            on = vj.toggle_now_spinning()
+            return f'Media: now-spinning platter {"on" if on else "off"}'
+        return 'Media: now-spinning unavailable on this core'
 
-    def render_overlay(self, width: int, height: int, dt: float,
-                       *args: Any) -> None:  # noqa: ARG002
-        """Main-output overlay hook: the corner platter while playing."""
-        if not self.enabled or not self.ambience_enabled or not self._is_playing:
-            return
-        if self._ambience is None:
-            try:
-                import importlib.util as _ilu  # noqa: PLC0415
-
-                ctx = getattr(getattr(self._app, 'vj_api', None), 'ctx', None)
-                if ctx is None:
-                    return
-                _pp = Path(__file__).resolve().parent / 'ambience.py'
-                _spec = _ilu.spec_from_file_location('media_ambience', _pp)
-                _mod = _ilu.module_from_spec(_spec)
-                _spec.loader.exec_module(_mod)
-                from PIL import ImageFont  # noqa: PLC0415
-
-                def _font(size):
-                    for p in ('/usr/share/fonts/liberation-mono-fonts/'
-                              'LiberationMono-Bold.ttf',
-                              '/usr/share/fonts/liberation-mono/'
-                              'LiberationMono-Bold.ttf'):
-                        try:
-                            return ImageFont.truetype(p, size)
-                        except Exception:
-                            continue
-                    return ImageFont.load_default()
-
-                corner = str(self._cfg.get('ambience_corner', 'br') or 'br')
-                self._ambience = _mod.MediaAmbience(ctx, _font(14), _font(11),
-                                                    corner=corner)
-                log.info('media-01: platter ambience ready (%s corner)', corner)
-            except Exception as exc:
-                self.ambience_enabled = False   # fail once, quietly
-                log.warning('media-01: ambience unavailable: %s', exc)
-                return
-        try:
-            self._ambience.render(int(width), int(height), self.snapshot())
-        except Exception as exc:
-            log.debug('media-01: ambience render failed: %s', exc)
+    @property
+    def ambience_enabled(self) -> bool:
+        vj = getattr(self._app, 'vj_api', None)
+        return bool(getattr(vj, 'now_spinning_enabled', False))
 
     # -- Media Deck window (Shift+L) ------------------------------------------
 
@@ -933,12 +916,6 @@ class MediaController:
             except Exception:
                 pass
         self.close_window()
-        if self._ambience is not None:
-            try:
-                self._ambience.release()
-            except Exception:
-                pass
-            self._ambience = None
         if self._backend is not None:
             self._backend.shutdown()
             self._backend = None

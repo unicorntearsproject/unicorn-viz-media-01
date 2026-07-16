@@ -433,6 +433,7 @@ class MediaDeckWindow:
                       ('Move down', 'pl_move', (self._sel, 1))]
         elif pls is not None:
             items.append(('Add to playlist »', 'add_menu', idx))
+        items.append(('Delete file…', 'del_arm', idx))
         self._menu = {'x': x, 'y': y, 'name': name, 'items': items}
 
     def _click_menu(self, x: int, y: int) -> None:
@@ -467,6 +468,15 @@ class MediaDeckWindow:
             elif action == 'pl_remove':
                 if pls is not None and self._c.active_playlist:
                     pls.remove(self._c.active_playlist, payload)
+                self._menu = None
+            elif action == 'del_arm':      # arm: the next click really deletes
+                menu['items'] = [('SURE? DELETE FILE', 'del_do', payload),
+                                 ('Cancel', 'del_cancel', None)]
+            elif action == 'del_do':
+                if hasattr(self._c, 'delete_track'):
+                    self._c.delete_track(payload)
+                self._menu = None
+            elif action == 'del_cancel':
                 self._menu = None
             elif action == 'pl_move':
                 if pls is not None and self._c.active_playlist:
