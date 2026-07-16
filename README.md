@@ -1,7 +1,7 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.11.0
+Version: 0.12.0
 Status: beta
 Last updated: 2026-06-29
 
@@ -84,6 +84,16 @@ media-01 is paused/stopped, the Spotify track (if playing) takes the band.
 Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
+
+- **0.12.0** — **Real crossfade.** The long-reserved `crossfade_ms` finally
+  does something: on the VLC backend the player now runs **two players** and
+  performs a true overlapping crossfade — the next track starts
+  `crossfade_ms` (default 3 s) **before the outro ends** and the volumes ramp
+  across; manual next/prev while playing crossfades too.  A **"crossfade
+  between tracks" checkbox** sits with the others in the Deck (config
+  `crossfade`, default on); on the mpv/ffplay fallbacks it shows
+  "(needs VLC)" and stays informational.  Repeat modes are honoured
+  (ONE crossfades into itself; OFF still stops at the end).
 
 - **0.11.0** — **Loop button + platter ambience.** A **repeat toggle** sits
   next to shuffle (circular-arrow icon): **ALL** wraps the active

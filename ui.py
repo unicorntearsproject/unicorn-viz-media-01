@@ -362,6 +362,8 @@ class MediaDeckWindow:
                 self._c.toggle_keep_playing()
             elif action == 'ambience_toggle':
                 self._c.toggle_ambience()
+            elif action == 'crossfade_toggle':
+                self._c.toggle_crossfade()
             elif action == 'set_mode':
                 self._c.set_mode(payload)
                 self._pl_open = self._sort_open = False
@@ -631,6 +633,24 @@ class MediaDeckWindow:
                font=self._font_s, fill=_TEXT if keep else _DIM)
         regions.append((lx0 + 6, kb_y - 3, lx0 + 240, kb_y + 15,
                         'keep_toggle', None))
+        # Crossfade checkbox (VLC backend: true overlapping fade; dim when
+        # the subprocess fallback can't do it).
+        can_xf = bool(snap.get('can_crossfade', False))
+        xf = bool(snap.get('crossfade', False)) and can_xf
+        xf_y = kb_y - 40
+        xcol = (_HOT if xf else _DIM) if can_xf else _FAINT
+        d.rectangle([lx0 + 6, xf_y, lx0 + 18, xf_y + 12],
+                    fill=_HOT if xf else (0, 0, 0, 90), outline=xcol)
+        if xf:
+            d.line([lx0 + 8, xf_y + 6, lx0 + 11, xf_y + 9], fill=(4, 18, 26, 255))
+            d.line([lx0 + 11, xf_y + 9, lx0 + 16, xf_y + 3], fill=(4, 18, 26, 255))
+        d.text((lx0 + 24, xf_y + 1),
+               'crossfade between tracks' + ('' if can_xf else ' (needs VLC)'),
+               font=self._font_s, fill=_TEXT if xf else xcol)
+        if can_xf:
+            regions.append((lx0 + 6, xf_y - 3, lx0 + 240, xf_y + 15,
+                            'crossfade_toggle', None))
+
         # Corner-platter ambience checkbox (main-output overlay).
         amb = bool(snap.get('ambience', True))
         ab_y = kb_y - 20

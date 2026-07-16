@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.11.0'
+__version__ = '0.12.0'
 
 import logging
 import os
@@ -118,13 +118,72 @@ class _VlcBackend:
         self._vlc = vlc
         args = ['--no-video', '--quiet']
         self._instance = vlc.Instance(args)
-        self._player = self._instance.media_player_new()
-        self._player.audio_set_volume(max(0, min(200, volume)))
+        # Two players so tracks can overlap for a true crossfade: the active
+        # one carries the current track; the other fades the old one out.
+        self._players = [self._instance.media_player_new(),
+                         self._instance.media_player_new()]
+        self._active = 0
+        self._volume = max(0, min(200, volume))
+        self._fade: list | None = None    # [elapsed_s, fade_s, outgoing idx]
+        for p in self._players:
+            p.audio_set_volume(self._volume)
+
+    @property
+    def _player(self):
+        return self._players[self._active]
 
     def play(self, path: Path) -> None:
+        self._end_fade(hard=True)
         media = self._instance.media_new(str(path))
         self._player.set_media(media)
         self._player.play()
+
+    can_crossfade = True
+
+    def crossfade_to(self, path: Path, fade_s: float = 3.0) -> bool:
+        """Start *path* on the idle player at volume 0 and begin the ramp.
+
+        The incoming player becomes active immediately (position/duration
+        report the new track); :meth:`tick` drives the volume ramp and stops
+        the outgoing player when it lands.
+        """
+        try:
+            out_idx = self._active
+            inc = self._players[1 - out_idx]
+            inc.set_media(self._instance.media_new(str(path)))
+            inc.audio_set_volume(0)
+            inc.play()
+            self._end_fade(hard=True)     # collapse any fade already running
+            self._active = 1 - out_idx
+            self._fade = [0.0, max(0.2, float(fade_s)), out_idx]
+            return True
+        except Exception:
+            return False
+
+    def tick(self, dt: float) -> None:
+        """Advance the crossfade ramp (called every frame while fading)."""
+        if self._fade is None:
+            return
+        self._fade[0] += max(0.0, float(dt))
+        t = min(1.0, self._fade[0] / self._fade[1])
+        out_idx = self._fade[2]
+        self._players[self._active].audio_set_volume(int(self._volume * t))
+        self._players[out_idx].audio_set_volume(int(self._volume * (1.0 - t)))
+        if t >= 1.0:
+            self._end_fade()
+
+    def _end_fade(self, hard: bool = False) -> None:
+        if self._fade is None:
+            return
+        out_idx = self._fade[2]
+        self._fade = None
+        try:
+            self._players[out_idx].stop()
+            self._players[out_idx].audio_set_volume(self._volume)
+            if hard:
+                self._players[self._active].audio_set_volume(self._volume)
+        except Exception:
+            pass
 
     def pause(self) -> None:
         self._player.pause()
@@ -135,6 +194,7 @@ class _VlcBackend:
         self._player.play()
 
     def stop(self) -> None:
+        self._end_fade(hard=True)
         self._player.stop()
 
     def is_playing(self) -> bool:
@@ -153,7 +213,9 @@ class _VlcBackend:
         return max(0.0, ms / 1000.0) if ms > 0 else 0.0
 
     def set_volume(self, volume: int) -> None:
-        self._player.audio_set_volume(max(0, min(200, volume)))
+        self._volume = max(0, min(200, volume))
+        if self._fade is None:            # mid-fade, tick() re-applies the ramp
+            self._player.audio_set_volume(self._volume)
 
     can_seek = True
     can_volume = True
@@ -166,8 +228,9 @@ class _VlcBackend:
 
     def shutdown(self) -> None:
         try:
-            self._player.stop()
-            self._player.release()
+            for p in self._players:
+                p.stop()
+                p.release()
             self._instance.release()
         except Exception:
             pass
@@ -263,6 +326,7 @@ class _SubprocessBackend:
 
     can_seek = False
     can_volume = False
+    can_crossfade = False
 
     def seek_s(self, seconds: float) -> None:
         pass  # subprocess backends can't seek
@@ -419,6 +483,11 @@ class MediaController:
         self.mode = 'library'              # 'library' | 'playlists'
         rep = str(self._cfg.get('repeat', 'all') or 'all').lower()
         self.repeat = rep if rep in ('all', 'one', 'off') else 'all'
+        # Crossfade between tracks (VLC backend: true overlapping fade).
+        self.crossfade_enabled = bool(self._cfg.get('crossfade', True))
+        self._crossfade_s = max(0.5, float(
+            self._cfg.get('crossfade_ms', 3000) or 3000) / 1000.0)
+        self._end_handled = False    # early-fade fired for the current track
         # Corner platter ambience on the main output (display-only overlay).
         self.ambience_enabled = bool(self._cfg.get('ambience', True))
         self._ambience = None
@@ -472,6 +541,15 @@ class MediaController:
             return f'Media: restart {self._title or "track"}'
         self._advance(-1)
         return f'Media: prev → {self._title or "track"}'
+
+    @property
+    def can_crossfade(self) -> bool:
+        return bool(getattr(self._backend, 'can_crossfade', False))
+
+    def toggle_crossfade(self) -> str:
+        self.crossfade_enabled = not self.crossfade_enabled
+        return ('Media: crossfade on' if self.crossfade_enabled
+                else 'Media: crossfade off')
 
     def cycle_repeat(self) -> str:
         """Loop button: cycle repeat ALL -> ONE -> OFF (playback wrap mode)."""
@@ -539,6 +617,10 @@ class MediaController:
 
         now = time.monotonic()
 
+        tick = getattr(self._backend, 'tick', None)
+        if callable(tick):
+            tick(dt)                      # advance any crossfade ramp
+
         if self._backend.is_playing():
             self._position_s = self._backend.position_s()
             # Prefer VLC's duration once it becomes available after playback starts.
@@ -547,6 +629,20 @@ class MediaController:
                 self._duration_s = backend_dur
             self._is_playing = True
             self._status = 'playing'
+            # Crossfade begins *before* the outro ends so the tracks overlap.
+            if (self.crossfade_enabled and not self._end_handled
+                    and getattr(self._backend, 'can_crossfade', False)
+                    and self._duration_s > 0.0
+                    and (self._duration_s - self._position_s)
+                    <= self._crossfade_s):
+                self._end_handled = True
+                if self.repeat == 'one':
+                    self._start_track(self._index)
+                else:
+                    view = self.view_indices()
+                    at_end = bool(view) and self._index == view[-1]
+                    if not (self.repeat == 'off' and at_end):
+                        self._advance(1)
         elif self._status == 'playing' and self._backend.is_ended():
             # Track finished — auto-advance within the active view, honouring
             # the repeat mode (ALL wraps, ONE restarts, OFF stops at the end).
@@ -905,6 +1001,8 @@ class MediaController:
             'shuffle': self._shuffle,
             'repeat': self.repeat,
             'ambience': self.ambience_enabled,
+            'crossfade': self.crossfade_enabled,
+            'can_crossfade': self.can_crossfade,
             'keep_playing_on_close': self.keep_playing_on_close,
         }
 
@@ -933,7 +1031,13 @@ class MediaController:
         self._change_counter += 1
         self._banner_promote_at = time.monotonic() + self._now_playing_banner_delay_s
 
-        self._backend.play(path)
+        faded = False
+        if (self.crossfade_enabled and self._is_playing
+                and getattr(self._backend, 'can_crossfade', False)):
+            faded = bool(self._backend.crossfade_to(path, self._crossfade_s))
+        if not faded:
+            self._backend.play(path)
+        self._end_handled = False
         self._is_playing = True
         self._status = 'playing'
 
