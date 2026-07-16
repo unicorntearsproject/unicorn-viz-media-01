@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.9.2'
+__version__ = '0.10.0'
 
 import logging
 import os
@@ -363,6 +363,12 @@ class MediaController:
             return
 
         self._library = _scan_library(self._media_dir)
+        for t in self._library:            # crate = top-level subfolder
+            try:
+                rel = Path(t['path']).relative_to(self._media_dir)
+                t['bucket'] = rel.parts[0] if len(rel.parts) > 1 else ''
+            except Exception:
+                t['bucket'] = ''
         if not self._library:
             log.warning(
                 'media-01: no audio files found in %s; check media_dir in config',
@@ -393,6 +399,29 @@ class MediaController:
                 log.debug('media-01: now-playing registration failed: %s', exc)
 
         self._window = None       # Media Deck window (Shift+L)
+        # Playlists + library view state (accordion crates / sort / excludes).
+        # Playback (next/prev/auto-advance) follows the ACTIVE VIEW: the open
+        # playlist, else the open crate minus excluded crates.
+        self._playlists = None
+        try:
+            import importlib.util as _ilu  # noqa: PLC0415
+
+            _pp = Path(__file__).resolve().parent / 'playlists.py'
+            _spec = _ilu.spec_from_file_location('media_playlists', _pp)
+            _mod = _ilu.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+            store_path = self._cfg.get('playlists_path') or (
+                Path(__file__).resolve().parents[2] / 'runtime'
+                / 'media_playlists.json')
+            self._playlists = _mod.MediaPlaylists(store_path)
+        except Exception as exc:
+            log.warning('media-01: playlists store unavailable: %s', exc)
+        self.mode = 'library'              # 'library' | 'playlists'
+        self.active_playlist: str | None = None
+        self.bucket: str | None = (self._playlists.last_bucket
+                                   if self._playlists else None)
+        self._sort_key: str | None = None  # 'title' | 'artist' | None
+        self._sort_asc = True
         # Closing the Media Deck leaves the music playing by default (the
         # window is a remote control, not the player).  The in-window checkbox
         # toggles this; config sets the startup default.
@@ -426,8 +455,7 @@ class MediaController:
         """Advance to the next track."""
         if not self.enabled or not self._library:
             return 'Media: library empty'
-        self._index = (self._index + 1) % len(self._library)
-        self._start_track(self._index)
+        self._advance(1)
         return f'Media: next → {self._title or "track"}'
 
     def prev_track(self) -> str:
@@ -437,8 +465,7 @@ class MediaController:
         if self._backend is not None and self._backend.position_s() > 3.0:
             self._start_track(self._index)
             return f'Media: restart {self._title or "track"}'
-        self._index = (self._index - 1) % len(self._library)
-        self._start_track(self._index)
+        self._advance(-1)
         return f'Media: prev → {self._title or "track"}'
 
     def toggle_shuffle(self) -> str:
@@ -510,10 +537,9 @@ class MediaController:
             self._is_playing = True
             self._status = 'playing'
         elif self._status == 'playing' and self._backend.is_ended():
-            # Track finished — auto-advance.
-            self._index = (self._index + 1) % max(1, len(self._library))
+            # Track finished — auto-advance within the active view.
             if self._library:
-                self._start_track(self._index)
+                self._advance(1)
         elif self._status == 'paused':
             pass
         else:
@@ -558,6 +584,99 @@ class MediaController:
             return None
 
         return False
+
+    # -- active view: crates / sort / playlists --------------------------------
+
+    def buckets(self) -> list[tuple]:
+        """Accordion crates: (key, label, count, excluded); ALL first."""
+        counts: dict[str, int] = {}
+        for t in self._library:
+            b = str(t.get('bucket', '') or '')
+            if b:
+                counts[b] = counts.get(b, 0) + 1
+        exc = self._playlists.excluded if self._playlists else set()
+        visible_total = sum(1 for t in self._library
+                            if str(t.get('bucket', '') or '') not in exc)
+        out = [(None, 'ALL', visible_total, False)]
+        out += [(b, b.upper(), n, b in exc) for b, n in sorted(counts.items())]
+        return out
+
+    def set_bucket(self, name: str | None) -> None:
+        self.bucket = name or None
+        if self._playlists:
+            self._playlists.set_last_bucket(self.bucket)
+
+    def toggle_exclude(self, bucket: str) -> bool:
+        """Hide/show a crate everywhere (library, ALL, and playback)."""
+        if not self._playlists or not bucket:
+            return False
+        state = self._playlists.toggle_excluded(bucket)
+        if self.bucket == bucket and state:
+            self.set_bucket(None)          # excluded the open crate -> ALL
+        return state
+
+    def set_sort(self, key: str | None, ascending: bool = True) -> None:
+        self._sort_key = key if key in ('title', 'artist') else None
+        self._sort_asc = bool(ascending)
+
+    @property
+    def sort(self) -> tuple:
+        return self._sort_key, self._sort_asc
+
+    def set_mode(self, mode: str) -> None:
+        if mode in ('library', 'playlists'):
+            self.mode = mode
+            if (mode == 'playlists' and self._playlists
+                    and self.active_playlist not in self._playlists.names()):
+                names = self._playlists.names()
+                self.active_playlist = names[0] if names else None
+
+    @property
+    def playlists(self):
+        return self._playlists
+
+    def view_indices(self) -> list[int]:
+        """Library indices in active-view order — the playback sequence."""
+        if self.mode == 'playlists' and self._playlists and self.active_playlist:
+            by_path = {str(t.get('path', '')): i
+                       for i, t in enumerate(self._library)}
+            return [by_path[p] for p in
+                    self._playlists.tracks(self.active_playlist)
+                    if p in by_path]
+        exc = self._playlists.excluded if self._playlists else set()
+        idx = [i for i, t in enumerate(self._library)
+               if str(t.get('bucket', '') or '') not in exc
+               and (self.bucket is None
+                    or str(t.get('bucket', '') or '') == self.bucket)]
+        if self._sort_key:
+            def _key(i: int):
+                t = self._library[i]
+                v = str(t.get(self._sort_key, '') or '')
+                return (v.lower() or '~', str(t.get('title', '')).lower())
+            idx.sort(key=_key, reverse=not self._sort_asc)
+        return idx
+
+    def snapshot_path_at(self, index: int) -> str | None:
+        """Absolute path of library row *index* (playlist membership)."""
+        if 0 <= index < len(self._library):
+            return str(self._library[index].get('path', '') or '') or None
+        return None
+
+    def view_rows(self) -> list[tuple[int, str]]:
+        """(library index, display name) rows for the active view."""
+        names = self.library_names()
+        return [(i, names[i]) for i in self.view_indices()]
+
+    def _advance(self, delta: int) -> None:
+        """Move within the active view (auto-advance / next / prev)."""
+        view = self.view_indices()
+        if not view:
+            return
+        try:
+            pos = (view.index(self._index) + delta) % len(view)
+        except ValueError:
+            pos = 0                        # current track fell out of the view
+        self._start_track(view[pos])
 
     # -- Media Deck window (Shift+L) ------------------------------------------
 

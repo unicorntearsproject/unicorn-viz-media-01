@@ -1,7 +1,7 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.9.2
+Version: 0.10.0
 Status: beta
 Last updated: 2026-06-29
 
@@ -84,6 +84,18 @@ media-01 is paused/stopped, the Spotify track (if playing) takes the band.
 Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
+
+- **0.10.0** — **Playlists, accordion crates, sort & excludes.** The Media
+  Deck library gains **LIBRARY | PLAYLISTS tabs**: playlists (the mixer's
+  *sets*, media-player naming) persist to `runtime/media_playlists.json`, with
+  a picker flyout + **+ NEW**, right-click **Add to playlist »** on library
+  rows and **Remove / Move up / Move down** in playlist view — and playback
+  (next/prev/**auto-advance**) follows the open playlist.  The library shows
+  **accordion crates** (one per top-level subfolder, ALL first, one open at a
+  time), each with an **exclude toggle** (×) that hides that crate from the
+  library, ALL, and playback — the interface way to keep loops/foley out of
+  the listening rotation; excludes and the open crate persist.  A **sort
+  flyout** (artist/title ↑↓, scan order) rounds out the browser.
 
 - **0.9.2** — The mouse cursor now shows over the Media Deck (subsystem
   `is_open` cursor protocol) and **F toggles the window fullscreen**

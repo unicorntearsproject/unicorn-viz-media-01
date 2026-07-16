@@ -315,3 +315,96 @@ def test_f_key_toggles_window_fullscreen_not_forwarded(monkeypatch) -> None:
     win._on_key(sdl2.SDLK_f, 0, False)
     assert calls[-1] == 0                            # toggles back off
     win.close_now()
+
+
+def _real_controller(tmp_path, tracks):
+    """MediaController with a scanned fake library + fake backend."""
+    class _App:
+        vj_api = None
+
+    import soundfile as sf
+    import numpy as np
+    for rel in tracks:
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        sf.write(str(p), np.zeros((1000, 2), dtype='float32'), 48_000)
+    ctl = _mc.MediaController(_App(), {
+        'enabled': True, 'media_dir': str(tmp_path), 'shuffle': False,
+        'playlists_path': str(tmp_path / 'pl.json')})
+
+    class _Backend:
+        can_seek = can_volume = False
+
+        def play(self, path, duration_s=0.0):
+            self.last = str(path)
+
+        def pause(self):
+            pass
+
+        def is_playing(self):
+            return True
+
+        def is_ended(self):
+            return False
+
+        def position_s(self):
+            return 0.0
+
+        def duration_s(self):
+            return 0.0
+
+        def set_volume(self, v):
+            pass
+
+        def shutdown(self):
+            pass
+
+    ctl._backend = _Backend()
+    return ctl
+
+
+def test_crates_filter_view_and_excludes_hide_everywhere(tmp_path) -> None:
+    ctl = _real_controller(tmp_path, ['crates/a.wav', 'crates/b.wav',
+                                      'loops/l.wav', 'root.wav'])
+    assert [b[:2] for b in ctl.buckets()] == [(None, 'ALL'), ('crates', 'CRATES'),
+                                              ('loops', 'LOOPS')]
+    assert len(ctl.view_indices()) == 4               # ALL includes root
+    ctl.set_bucket('crates')
+    assert len(ctl.view_indices()) == 2
+    ctl.set_bucket(None)
+    assert ctl.toggle_exclude('loops') is True        # hide the loops crate
+    assert len(ctl.view_indices()) == 3
+    names = [n for _, n in ctl.view_rows()]
+    assert not any('l' == n for n in names)
+    assert ctl.buckets()[0][2] == 3                   # ALL count respects it
+    ctl.shutdown()
+
+
+def test_playlist_playback_advances_within_the_playlist(tmp_path) -> None:
+    ctl = _real_controller(tmp_path, ['a.wav', 'b.wav', 'c.wav', 'd.wav'])
+    pls = ctl.playlists
+    name = pls.create('Gig')
+    paths = [ctl.snapshot_path_at(i) for i in (2, 0)]  # c then a
+    pls.add(name, paths)
+    ctl.set_mode('playlists')
+    assert ctl.active_playlist == 'Gig'
+    view = ctl.view_indices()
+    assert view == [2, 0]
+    ctl.play_index(view[0])                            # play c
+    assert ctl._backend.last.endswith('c.wav')
+    ctl.next_track()                                   # advances WITHIN playlist
+    assert ctl._backend.last.endswith('a.wav')
+    ctl.next_track()                                   # wraps to c
+    assert ctl._backend.last.endswith('c.wav')
+    ctl.shutdown()
+
+
+def test_sort_orders_the_library_view(tmp_path) -> None:
+    ctl = _real_controller(tmp_path, ['zz.wav', 'aa.wav', 'mm.wav'])
+    ctl.set_sort('title', True)
+    names = [n for _, n in ctl.view_rows()]
+    assert names == sorted(names)
+    ctl.set_sort('title', False)
+    names = [n for _, n in ctl.view_rows()]
+    assert names == sorted(names, reverse=True)
+    ctl.shutdown()

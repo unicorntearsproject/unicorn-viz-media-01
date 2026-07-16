@@ -109,6 +109,10 @@ class MediaDeckWindow:
         self._search_focused = False
         self._rows_visible = 10
         self._close_confirm_deadline = 0.0
+        self._menu: dict | None = None      # right-click context menu
+        self._menu_rects: list = []
+        self._pl_open = False               # playlist picker flyout
+        self._sort_open = False             # sort flyout
         self._frame_id = 0
         self._presented_id = -1
         self._raw: bytes | None = None
@@ -248,9 +252,18 @@ class MediaDeckWindow:
             self._move_sel(-int(event.wheel.y) or 1)
             return
         if (event.type == sdl2.SDL_MOUSEBUTTONDOWN
+                and event.button.button == sdl2.SDL_BUTTON_RIGHT):
+            bx = int(event.button.x * self._mouse_scale_x)
+            by = int(event.button.y * self._mouse_scale_y)
+            self._right_click(bx, by)
+            return
+        if (event.type == sdl2.SDL_MOUSEBUTTONDOWN
                 and event.button.button == sdl2.SDL_BUTTON_LEFT):
             bx = int(event.button.x * self._mouse_scale_x)
             by = int(event.button.y * self._mouse_scale_y)
+            if self._menu is not None:
+                self._click_menu(bx, by)
+                return
             self._click(bx, by, int(event.button.clicks))
             return
 
@@ -345,6 +358,30 @@ class MediaDeckWindow:
                 self._search_focused = True
             elif action == 'keep_toggle':
                 self._c.toggle_keep_playing()
+            elif action == 'set_mode':
+                self._c.set_mode(payload)
+                self._pl_open = self._sort_open = False
+                self._sel = 0
+            elif action == 'set_bucket':
+                self._c.set_bucket(payload)
+                self._sel = 0
+            elif action == 'exclude_bucket':
+                self._c.toggle_exclude(payload)
+            elif action == 'toggle_sort':
+                self._sort_open = not self._sort_open
+            elif action == 'set_sort':
+                self._c.set_sort(payload[0], payload[1])
+                self._sort_open = False
+            elif action == 'pl_flyout':
+                self._pl_open = not self._pl_open
+            elif action == 'pl_select':
+                self._c.active_playlist = payload
+                self._pl_open = False
+                self._sel = 0
+            elif action == 'pl_new':
+                pls = getattr(self._c, 'playlists', None)
+                if pls is not None:
+                    self._c.active_playlist = pls.create()
             elif action == 'seek' and getattr(self._c, 'can_seek', False):
                 x0, x1, dur = payload
                 frac = min(1.0, max(0.0, (x - x0) / max(1, x1 - x0)))
@@ -359,10 +396,81 @@ class MediaDeckWindow:
     # -- library view -----------------------------------------------------------
 
     def _view(self) -> list[tuple[int, str]]:
-        """(library index, display name) rows passing the search filter."""
-        names = self._c.library_names()
+        """(library index, display name) rows of the controller's active view
+        (open crate or playlist), further narrowed by the search box."""
+        rows_fn = getattr(self._c, 'view_rows', None)
+        rows = rows_fn() if callable(rows_fn) else             list(enumerate(self._c.library_names()))
         q = self._query.strip().lower()
-        return [(i, n) for i, n in enumerate(names) if not q or q in n.lower()]
+        return [(i, n) for i, n in rows if not q or q in n.lower()]
+
+    # -- right-click context menu ------------------------------------------
+
+    def _right_click(self, x: int, y: int) -> None:
+        if self._menu is not None:
+            self._menu = None
+            return
+        with self._frame_lock:
+            row = next((r for r in self._rows
+                        if r[0] <= x <= r[2] and r[1] <= y <= r[3]), None)
+        if row is None:
+            return
+        self._sel = row[4]
+        view = self._view()
+        if not (0 <= self._sel < len(view)):
+            return
+        idx, name = view[self._sel]
+        items: list[tuple[str, str, Any]] = [('Play', 'play_row', idx)]
+        pls = getattr(self._c, 'playlists', None)
+        if getattr(self._c, 'mode', 'library') == 'playlists':
+            items += [('Remove from playlist', 'pl_remove', self._sel),
+                      ('Move up', 'pl_move', (self._sel, -1)),
+                      ('Move down', 'pl_move', (self._sel, 1))]
+        elif pls is not None:
+            items.append(('Add to playlist »', 'add_menu', idx))
+        self._menu = {'x': x, 'y': y, 'name': name, 'items': items}
+
+    def _click_menu(self, x: int, y: int) -> None:
+        menu = self._menu
+        with self._frame_lock:
+            hit = next((r for r in self._menu_rects
+                        if r[0] <= x <= r[2] and r[1] <= y <= r[3]), None)
+        if hit is None or menu is None:
+            self._menu = None
+            return
+        action, payload = hit[4], hit[5]
+        pls = getattr(self._c, 'playlists', None)
+        try:
+            if action == 'play_row':
+                self._c.play_index(payload)
+                self._menu = None
+            elif action == 'add_menu':      # fly out to the playlist choices
+                names = pls.names() if pls else []
+                items = [(f'→ {n[:20]}', 'add_to', (n, payload)) for n in names]
+                items.append(('→ + new playlist', 'add_to', (None, payload)))
+                menu['items'] = items
+            elif action == 'add_to':
+                name, idx = payload
+                if pls is not None:
+                    if name is None:
+                        name = pls.create()
+                    path = str(self._c.snapshot_path_at(idx) or '')
+                    if path:
+                        pls.add(name, [path])
+                        log.info('media-deck: added to %s', name)
+                self._menu = None
+            elif action == 'pl_remove':
+                if pls is not None and self._c.active_playlist:
+                    pls.remove(self._c.active_playlist, payload)
+                self._menu = None
+            elif action == 'pl_move':
+                if pls is not None and self._c.active_playlist:
+                    pos, delta = payload
+                    pls.move(self._c.active_playlist, pos, delta)
+                    self._sel = max(0, pos + delta)
+                self._menu = None
+        except Exception as exc:
+            log.warning('media-deck: menu action %s failed: %s', action, exc)
+            self._menu = None
 
     # -- drawing ------------------------------------------------------------
 
@@ -503,17 +611,51 @@ class MediaDeckWindow:
         regions.append((lx0 + 6, kb_y - 3, lx0 + 240, kb_y + 15,
                         'keep_toggle', None))
 
-        # Library pane (right column).
+        # Library pane (right column): LIBRARY | PLAYLISTS tabs, accordion
+        # crates with per-crate exclude toggles, sort flyout, playlist picker.
         d.rectangle([rx0 - 4, top, rx1 + 4, h - gap],
                     fill=(13, 16, 28, 255), outline=(40, 52, 78, 255))
-        view = self._view()
-        self._sel = min(self._sel, max(0, len(view) - 1))
-        d.text((rx0 + 4, top + 6), f'LIBRARY  ({len(view)})',
-               font=self._font_s, fill=_EDGE)
-        d.text((rx1 - 132, top + 6), '↑↓ + enter plays', font=self._font_s,
-               fill=_FAINT)
+        mode = getattr(self._c, 'mode', 'library')
+        pls = getattr(self._c, 'playlists', None)
+        ty = top + 6
+        tabx = rx0 + 4
+        for label, m in (('LIBRARY', 'library'), ('PLAYLISTS', 'playlists')):
+            on = mode == m
+            tw2 = len(label) * 6 + 16
+            if on:
+                d.rectangle([tabx, ty, tabx + tw2, ty + 18],
+                            fill=(0, 45, 90, 255), outline=_EDGE)
+            else:
+                d.rectangle([tabx, ty, tabx + tw2, ty + 18], outline=_DIM)
+            d.text((tabx + 8, ty + 4), label, font=self._font_s,
+                   fill=_TEXT if on else _DIM)
+            regions.append((tabx, ty, tabx + tw2, ty + 18, 'set_mode', m))
+            tabx += tw2 + 4
+        # Sort flyout icon at the right edge of the tab row (library mode).
+        if mode == 'library':
+            sox = rx1 - 26
+            skey = getattr(self._c, 'sort', (None, True))[0]
+            scol = _HOT if (self._sort_open or skey) else _DIM
+            d.rectangle([sox, ty, sox + 22, ty + 18], outline=scol)
+            d.text((sox + 4, ty + 4), '↑↓', font=self._font_s, fill=scol)
+            regions.append((sox, ty, sox + 22, ty + 18, 'toggle_sort', None))
+        sy = ty + 24
+        if mode == 'playlists':
+            cur = getattr(self._c, 'active_playlist', None) or '(none)'
+            lab = f'PL: {cur[:16]} ▼'
+            plw = len(lab) * 6 + 14
+            d.rectangle([rx0 + 4, sy, rx0 + 4 + plw, sy + 18],
+                        outline=_HOT, fill=(0, 0, 0, 60))
+            d.text((rx0 + 11, sy + 4), lab, font=self._font_s, fill=_HOT)
+            regions.append((rx0 + 4, sy, rx0 + 4 + plw, sy + 18,
+                            'pl_flyout', None))
+            nx = rx0 + 4 + plw + 6
+            d.rectangle([nx, sy, nx + 46, sy + 18], outline=_DIM,
+                        fill=(0, 0, 0, 60))
+            d.text((nx + 6, sy + 4), '+ NEW', font=self._font_s, fill=_DIM)
+            regions.append((nx, sy, nx + 46, sy + 18, 'pl_new', None))
+            sy += 24
         # Search box.
-        sy = top + 22
         d.rectangle([rx0 + 4, sy, rx1 - 4, sy + 18],
                     outline=_EDGE if self._search_focused else _DIM)
         q = self._query
@@ -522,10 +664,52 @@ class MediaDeckWindow:
         d.text((rx0 + 10, sy + 4), hint[:38], font=self._font_s,
                fill=_TEXT if q else _FAINT)
         regions.append((rx0 + 4, sy, rx1 - 4, sy + 18, 'focus_search', None))
-        # Rows.
-        row_h = 20
         list_top = sy + 26
-        self._rows_visible = max(1, (h - gap - list_top) // row_h)
+        list_bot = h - gap
+        # Accordion crates (library mode with real subfolders).
+        buckets = (self._c.buckets()
+                   if mode == 'library' and hasattr(self._c, 'buckets') else [])
+        if len(buckets) > 1:
+            hh = 18
+            open_b = getattr(self._c, 'bucket', None)
+            open_pos = next((i for i, b in enumerate(buckets)
+                             if b[0] == open_b), 0)
+            for i, (bkey, blabel, bcount, excluded) in enumerate(buckets):
+                is_open = i == open_pos
+                hy = (list_top + i * hh if i <= open_pos
+                      else list_bot - (len(buckets) - i) * hh)
+                if is_open:
+                    d.rectangle([rx0, hy, rx1, hy + hh - 2],
+                                fill=(0, 45, 90, 255), outline=_EDGE)
+                else:
+                    d.rectangle([rx0, hy, rx1, hy + hh - 2],
+                                fill=(16, 20, 34, 255),
+                                outline=(40, 52, 78, 255))
+                lcol = (_WARN if excluded else
+                        (_TEXT if is_open else _DIM))
+                tag = '× ' if excluded else ''
+                d.text((rx0 + 6, hy + 3),
+                       f'{"▼" if is_open else "►"} {tag}{blabel[:16]} ({bcount})',
+                       font=self._font_s, fill=lcol)
+                regions.append((rx0, hy, rx1 - 30, hy + hh - 2,
+                                'set_bucket', bkey))
+                if bkey is not None:       # exclude eye (not on ALL)
+                    ex = rx1 - 24
+                    d.rectangle([ex, hy + 2, ex + 18, hy + hh - 4],
+                                outline=_WARN if excluded else _DIM)
+                    d.text((ex + 5, hy + 3), '×' if excluded else 'o',
+                           font=self._font_s,
+                           fill=_WARN if excluded else _DIM)
+                    regions.append((ex, hy + 2, ex + 18, hy + hh - 4,
+                                    'exclude_bucket', bkey))
+            list_top = list_top + (open_pos + 1) * hh + 2
+            list_bot = list_bot - (len(buckets) - open_pos - 1) * hh
+        # Rows.
+        view = self._view()
+        self._sel = min(self._sel, max(0, len(view) - 1))
+        d.text((rx0 + 4, top + 6 - 0), '', font=self._font_s, fill=_FAINT)
+        row_h = 20
+        self._rows_visible = max(1, (list_bot - list_top) // row_h)
         offset = max(0, min(max(0, len(view) - self._rows_visible),
                             self._sel - self._rows_visible // 2))
         playing_name = (f'{artist} - {title}' if artist else title)
@@ -544,12 +728,61 @@ class MediaDeckWindow:
             d.text((rx0 + 14, ry), label, font=self._font_s, fill=ncol)
             rows.append((rx0, ry - 1, rx1, ry + row_h - 3, i))
         if len(view) > self._rows_visible:
-            track_h = h - gap - list_top
+            track_h = list_bot - list_top
             bar_h = max(12, int(track_h * self._rows_visible / len(view)))
             bar_y = list_top + int(track_h * offset / len(view))
-            d.rectangle([rx1 - 2, list_top, rx1, h - gap],
+            d.rectangle([rx1 - 2, list_top, rx1, list_bot],
                         fill=(30, 40, 60, 255))
             d.rectangle([rx1 - 2, bar_y, rx1, bar_y + bar_h], fill=_DIM)
+        # Flyouts + context menu paint over the rows.
+        menu_rects: list = []
+        if self._sort_open and mode == 'library':
+            opts = (('Artist ↑', 'artist', True), ('Artist ↓', 'artist', False),
+                    ('Title ↑', 'title', True), ('Title ↓', 'title', False),
+                    ('Scan order', None, True))
+            fy = ty + 22
+            fx = rx1 - 130
+            d.rectangle([fx, fy, rx1 - 4, fy + 6 + 18 * len(opts)],
+                        fill=_PANEL, outline=_EDGE)
+            cur = getattr(self._c, 'sort', (None, True))
+            ry2 = fy + 3
+            for lab, k, asc in opts:
+                on = cur == (k, asc)
+                d.text((fx + 8, ry2), f'{"●" if on else "○"} {lab}',
+                       font=self._font_s, fill=_HOT if on else _DIM)
+                regions.append((fx, ry2 - 1, rx1 - 4, ry2 + 17,
+                                'set_sort', (k, asc)))
+                ry2 += 18
+        if self._pl_open and mode == 'playlists' and pls is not None:
+            names = pls.names() or []
+            fy = sy - 2
+            d.rectangle([rx0 + 4, fy, rx0 + 200, fy + 6 + 18 * max(1, len(names))],
+                        fill=_PANEL, outline=_EDGE)
+            ry2 = fy + 3
+            for n in names:
+                on = n == getattr(self._c, 'active_playlist', None)
+                d.text((rx0 + 12, ry2),
+                       f'{"●" if on else "○"} {n[:20]} ({len(pls.tracks(n))})',
+                       font=self._font_s, fill=_HOT if on else _DIM)
+                regions.append((rx0 + 4, ry2 - 1, rx0 + 200, ry2 + 17,
+                                'pl_select', n))
+                ry2 += 18
+            if not names:
+                d.text((rx0 + 12, ry2), '(none — use + NEW)',
+                       font=self._font_s, fill=_FAINT)
+        if self._menu is not None:
+            items = self._menu.get('items') or []
+            mw, mh = 190, 24 + 20 * len(items)
+            mx = max(4, min(int(self._menu['x']), w - mw - 4))
+            my = max(4, min(int(self._menu['y']), h - mh - 4))
+            d.rectangle([mx, my, mx + mw, my + mh], fill=_PANEL, outline=_HOT)
+            d.text((mx + 8, my + 4), str(self._menu.get('name', ''))[:28],
+                   font=self._font_s, fill=_FAINT)
+            ry2 = my + 22
+            for lab, act, payload in items:
+                d.text((mx + 10, ry2 + 3), lab, font=self._font_s, fill=_TEXT)
+                menu_rects.append((mx, ry2, mx + mw, ry2 + 20, act, payload))
+                ry2 += 20
 
         # Esc-Esc confirmation banner.
         if time.monotonic() < self._close_confirm_deadline:
@@ -560,6 +793,7 @@ class MediaDeckWindow:
         with self._frame_lock:
             self._regions = regions
             self._rows = rows
+            self._menu_rects = menu_rects
         return img
 
     def _draw_platter(self, d, cx, cyc, r, playing, pos, dur) -> None:
