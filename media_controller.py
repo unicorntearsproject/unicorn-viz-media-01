@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.5.0'
+__version__ = '0.6.0'
 
 import logging
 import os
@@ -365,6 +365,16 @@ class MediaController:
             type(self._backend).__name__ if self._backend else 'none',
         )
 
+        # Announce through the core now-playing hub (banner + HUD pane) —
+        # priority 20: outranks Spotify while actually playing, yields to the
+        # DJ mixer.  Guarded so older cores without the hub still work.
+        vj = getattr(app, 'vj_api', None)
+        if vj is not None and hasattr(vj, 'register_now_playing'):
+            try:
+                vj.register_now_playing('media', self.snapshot, priority=20)
+            except Exception as exc:
+                log.debug('media-01: now-playing registration failed: %s', exc)
+
     # ------------------------------------------------------------------
     # Public control surface
     # ------------------------------------------------------------------
@@ -482,6 +492,12 @@ class MediaController:
 
     def shutdown(self) -> None:
         """Stop playback and release resources."""
+        vj = getattr(self._app, 'vj_api', None)
+        if vj is not None and hasattr(vj, 'unregister_now_playing'):
+            try:
+                vj.unregister_now_playing('media')
+            except Exception:
+                pass
         if self._backend is not None:
             self._backend.shutdown()
             self._backend = None

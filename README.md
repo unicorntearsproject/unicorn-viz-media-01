@@ -1,7 +1,7 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.5.0
+Version: 0.6.0
 Status: active
 Last updated: 2026-06-29
 
@@ -84,5 +84,10 @@ media-01 is paused/stopped, the Spotify track (if playing) takes the band.
 Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
+
+- **0.6.0** — Register with the core **now-playing announcement hub**
+  (`vj_api.register_now_playing`, priority 20) instead of being hard-wired in
+  `app.py`; the banner/HUD machinery is now shared with Spotify and the DJ
+  mixer.  Guarded no-op on older cores.
 
 - **0.5.0** — initial versioned release.
