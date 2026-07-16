@@ -1,8 +1,8 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.6.0
-Status: active
+Version: 0.9.0
+Status: beta
 Last updated: 2026-06-29
 
 `media-01` is a local audio playback subsystem for unicorn-viz.  It scans a
@@ -84,6 +84,20 @@ media-01 is paused/stopped, the Spotify track (if playing) takes the band.
 Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
+
+- **0.9.0** — **Beta: the Media Deck window** (`Shift+L`), a single-deck
+  sibling of the DJ mixer's board in the same visual language: a **big neon
+  platter** (breathing glow, vinyl grooves, strobe spokes, orbiting sparkles,
+  a progress dot riding the rim, elapsed time on the label), a now-playing
+  block with previous-track line, a **click-to-seek progress bar** (VLC
+  backend; display-only on subprocess fallbacks), chunky **PREV / PLAY / NEXT**
+  transport with a pulsing play button, a **shuffle icon toggle**, a **volume
+  slider** (VLC), and a **library browser** with search, wheel scroll, click
+  select / double-click play, ↑/↓ + Enter keyboard nav, playing-track cyan
+  highlight and a scrollbar.  Esc-Esc closes.  New backend surface:
+  `seek_s`/`can_seek`/`can_volume`, controller `play_index`/`seek_to`/
+  `library_names`.  Window config: `window_width`, `window_height`,
+  `display_index`, `render_interval`.
 
 - **0.6.0** — Register with the core **now-playing announcement hub**
   (`vj_api.register_now_playing`, priority 20) instead of being hard-wired in

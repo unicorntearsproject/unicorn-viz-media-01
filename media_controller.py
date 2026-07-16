@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.6.0'
+__version__ = '0.9.0'
 
 import logging
 import os
@@ -33,10 +33,12 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 HELP_ENTRIES = [
+    ('Local Media', 'Shift+L', 'Toggle the Media Deck window'),
     ('Local Media', 'Ctrl+Alt+M', 'Play / pause'),
     ('Local Media', 'Ctrl+Alt+N', 'Next track'),
     ('Local Media', 'Ctrl+Alt+B', 'Previous track / restart'),
     ('Local Media', 'Ctrl+Alt+Shift+M', 'Toggle shuffle'),
+    ('Local Media', 'Esc Esc', 'Close the Media Deck window (press twice)'),
 ]
 
 # Audio file extensions to scan for
@@ -153,6 +155,15 @@ class _VlcBackend:
     def set_volume(self, volume: int) -> None:
         self._player.audio_set_volume(max(0, min(200, volume)))
 
+    can_seek = True
+    can_volume = True
+
+    def seek_s(self, seconds: float) -> None:
+        try:
+            self._player.set_time(int(max(0.0, seconds) * 1000))
+        except Exception:
+            pass
+
     def shutdown(self) -> None:
         try:
             self._player.stop()
@@ -249,6 +260,12 @@ class _SubprocessBackend:
 
     def set_volume(self, volume: int) -> None:
         pass  # subprocess backends don't support runtime volume changes
+
+    can_seek = False
+    can_volume = False
+
+    def seek_s(self, seconds: float) -> None:
+        pass  # subprocess backends can't seek
 
     def shutdown(self) -> None:
         self.stop()
@@ -375,6 +392,8 @@ class MediaController:
             except Exception as exc:
                 log.debug('media-01: now-playing registration failed: %s', exc)
 
+        self._window = None       # Media Deck window (Shift+L)
+
     # ------------------------------------------------------------------
     # Public control surface
     # ------------------------------------------------------------------
@@ -428,6 +447,44 @@ class MediaController:
         if self._backend is not None:
             self._backend.set_volume(self._volume)
 
+    @property
+    def volume(self) -> int:
+        return self._volume
+
+    @property
+    def can_seek(self) -> bool:
+        return bool(getattr(self._backend, 'can_seek', False))
+
+    @property
+    def can_volume(self) -> bool:
+        return bool(getattr(self._backend, 'can_volume', False))
+
+    def seek_to(self, seconds: float) -> None:
+        """Jump within the current track (VLC backend only)."""
+        if self._backend is not None and self.can_seek:
+            self._backend.seek_s(seconds)
+            self._position_s = max(0.0, float(seconds))
+
+    def play_index(self, index: int) -> str:
+        """Play library row *index* (browser double-click / Enter)."""
+        if not self.enabled or not self._library or self._backend is None:
+            return 'Media: library empty'
+        self._start_track(int(index) % len(self._library))
+        return f'Media: playing {self._title or "track"}'
+
+    @property
+    def library_index(self) -> int:
+        return self._index
+
+    def library_names(self) -> list[str]:
+        """Display names ('Artist - Title' or stem) for the browser list."""
+        out: list[str] = []
+        for t in self._library:
+            title = str(t.get('title', '') or '') or Path(str(t.get('path', ''))).stem
+            artist = str(t.get('artist', '') or '')
+            out.append(f'{artist} - {title}' if artist else title)
+        return out
+
     # ------------------------------------------------------------------
     # Subsystem interface (called by app.py)
     # ------------------------------------------------------------------
@@ -462,6 +519,10 @@ class MediaController:
             self._banner_change_counter = self._change_counter
             self._banner_promote_at = 0.0
 
+        win = self._window
+        if win is not None and not win.is_open:
+            self.close_window()          # window self-closed (Esc Esc)
+
     def handle_key(self, sym: int, mod: int) -> str | None | bool:
         """Handle media hotkeys.
 
@@ -487,8 +548,71 @@ class MediaController:
             return self.prev_track()
         if ctrl and alt and shift and sym == sdl2.SDLK_m:
             return self.toggle_shuffle()
+        if shift and not ctrl and not alt and sym == sdl2.SDLK_l:
+            self.toggle_window()
+            return None
 
         return False
+
+    # -- Media Deck window (Shift+L) ------------------------------------------
+
+    @property
+    def is_window_open(self) -> bool:
+        return self._window is not None and self._window.is_open
+
+    def open_window(self) -> None:
+        if not self.enabled or self._window is not None:
+            return
+        try:
+            import importlib.util  # noqa: PLC0415
+
+            path = Path(__file__).resolve().parent / 'ui.py'
+            spec = importlib.util.spec_from_file_location('media_deck_ui', path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            self._window = mod.MediaDeckWindow(
+                self, self._cfg, vj_api=getattr(self._app, 'vj_api', None))
+            log.info('media-01: Media Deck window opened')
+        except Exception as exc:
+            self._window = None
+            log.warning('media-01: Media Deck window failed to open: %s', exc)
+        finally:
+            vj = getattr(self._app, 'vj_api', None)
+            if vj is not None:      # opening a 2nd SDL window can migrate GL
+                try:
+                    vj.rebind_main_gl_context()
+                except Exception:
+                    pass
+
+    def close_window(self) -> None:
+        win = self._window
+        self._window = None
+        if win is not None:
+            try:
+                win.close_now()
+            except Exception:
+                pass
+            vj = getattr(self._app, 'vj_api', None)
+            if vj is not None:
+                try:
+                    vj.rebind_main_gl_context()
+                except Exception:
+                    pass
+
+    def toggle_window(self) -> None:
+        if self.is_window_open:
+            self.close_window()
+        else:
+            self.open_window()
+
+    def present(self) -> None:
+        """Blit the Media Deck window (called each frame by the app)."""
+        win = self._window
+        if win is not None:
+            try:
+                win.present()
+            except Exception as exc:
+                log.debug('media-01: present failed: %s', exc)
 
     def shutdown(self) -> None:
         """Stop playback and release resources."""
@@ -498,6 +622,7 @@ class MediaController:
                 vj.unregister_now_playing('media')
             except Exception:
                 pass
+        self.close_window()
         if self._backend is not None:
             self._backend.shutdown()
             self._backend = None
