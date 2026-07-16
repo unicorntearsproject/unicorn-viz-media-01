@@ -354,10 +354,14 @@ class MediaDeckWindow:
                 self._c.prev_track()
             elif action == 'shuffle':
                 self._c.toggle_shuffle()
+            elif action == 'repeat':
+                self._c.cycle_repeat()
             elif action == 'focus_search':
                 self._search_focused = True
             elif action == 'keep_toggle':
                 self._c.toggle_keep_playing()
+            elif action == 'ambience_toggle':
+                self._c.toggle_ambience()
             elif action == 'set_mode':
                 self._c.set_mode(payload)
                 self._pl_open = self._sort_open = False
@@ -551,8 +555,8 @@ class MediaDeckWindow:
 
         # Transport: |◄ PREV | PLAY (wide, pulsing) | NEXT ►| | SHUF | volume.
         th = 34
-        # 6-unit grid: PREV 1 | PLAY 2 | NEXT 1 | SHUF 1 | VOL 1.
-        bw = (lx1 - lx0 - 12 - 4 * 6) // 6
+        # 7-unit grid: PREV 1 | PLAY 2 | NEXT 1 | LOOP 1 | SHUF 1 | VOL 1.
+        bw = (lx1 - lx0 - 12 - 5 * 6) // 7
         bx = lx0 + 6
         pulse = 0.5 + 0.5 * abs((time.monotonic() * 0.8) % 2.0 - 1.0)
         buttons = [
@@ -570,6 +574,23 @@ class MediaDeckWindow:
                    font=self._font_b, fill=col)
             regions.append((bx, cy, bx + bwu, cy + th, act, None))
             bx += bwu + 6
+        # Repeat (loop) toggle: ALL (lit) -> ONE (lit + 1) -> OFF (dim).
+        rep = str(snap.get('repeat', 'all') or 'all')
+        ron = rep != 'off'
+        d.rectangle([bx, cy, bx + bw, cy + th],
+                    fill=_HOT if ron else (0, 0, 0, 90),
+                    outline=_HOT if ron else _DIM)
+        icx, icy = bx + bw // 2, cy + th // 2
+        icol = (4, 18, 26, 255) if ron else _DIM
+        d.ellipse([icx - 7, icy - 6, icx + 7, icy + 6], outline=icol)
+        d.rectangle([icx + 2, icy - 8, icx + 9, icy - 3],
+                    fill=_HOT if ron else (0, 0, 0, 90))
+        d.line([icx + 6, icy - 6, icx + 1, icy - 8], fill=icol)
+        d.line([icx + 6, icy - 6, icx + 3, icy - 1], fill=icol)
+        if rep == 'one':
+            d.text((icx - 2, icy - 5), '1', font=self._font_s, fill=icol)
+        regions.append((bx, cy, bx + bw, cy + th, 'repeat', None))
+        bx += bw + 6
         # Shuffle icon toggle (crossing arrows, mixer-style).
         on = bool(snap.get('shuffle', False))
         d.rectangle([bx, cy, bx + bw, cy + th],
@@ -610,6 +631,19 @@ class MediaDeckWindow:
                font=self._font_s, fill=_TEXT if keep else _DIM)
         regions.append((lx0 + 6, kb_y - 3, lx0 + 240, kb_y + 15,
                         'keep_toggle', None))
+        # Corner-platter ambience checkbox (main-output overlay).
+        amb = bool(snap.get('ambience', True))
+        ab_y = kb_y - 20
+        d.rectangle([lx0 + 6, ab_y, lx0 + 18, ab_y + 12],
+                    fill=_HOT if amb else (0, 0, 0, 90),
+                    outline=_HOT if amb else _DIM)
+        if amb:
+            d.line([lx0 + 8, ab_y + 6, lx0 + 11, ab_y + 9], fill=(4, 18, 26, 255))
+            d.line([lx0 + 11, ab_y + 9, lx0 + 16, ab_y + 3], fill=(4, 18, 26, 255))
+        d.text((lx0 + 24, ab_y + 1), 'corner platter on the visualizer',
+               font=self._font_s, fill=_TEXT if amb else _DIM)
+        regions.append((lx0 + 6, ab_y - 3, lx0 + 240, ab_y + 15,
+                        'ambience_toggle', None))
 
         # Library pane (right column): LIBRARY | PLAYLISTS tabs, accordion
         # crates with per-crate exclude toggles, sort flyout, playlist picker.

@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.10.0'
+__version__ = '0.11.0'
 
 import logging
 import os
@@ -417,6 +417,11 @@ class MediaController:
         except Exception as exc:
             log.warning('media-01: playlists store unavailable: %s', exc)
         self.mode = 'library'              # 'library' | 'playlists'
+        rep = str(self._cfg.get('repeat', 'all') or 'all').lower()
+        self.repeat = rep if rep in ('all', 'one', 'off') else 'all'
+        # Corner platter ambience on the main output (display-only overlay).
+        self.ambience_enabled = bool(self._cfg.get('ambience', True))
+        self._ambience = None
         self.active_playlist: str | None = None
         self.bucket: str | None = (self._playlists.last_bucket
                                    if self._playlists else None)
@@ -467,6 +472,12 @@ class MediaController:
             return f'Media: restart {self._title or "track"}'
         self._advance(-1)
         return f'Media: prev → {self._title or "track"}'
+
+    def cycle_repeat(self) -> str:
+        """Loop button: cycle repeat ALL -> ONE -> OFF (playback wrap mode)."""
+        order = ('all', 'one', 'off')
+        self.repeat = order[(order.index(self.repeat) + 1) % 3]
+        return f'Media: repeat {self.repeat.upper()}'
 
     def toggle_shuffle(self) -> str:
         """Toggle shuffle mode (takes effect on next track advance)."""
@@ -537,9 +548,19 @@ class MediaController:
             self._is_playing = True
             self._status = 'playing'
         elif self._status == 'playing' and self._backend.is_ended():
-            # Track finished — auto-advance within the active view.
+            # Track finished — auto-advance within the active view, honouring
+            # the repeat mode (ALL wraps, ONE restarts, OFF stops at the end).
             if self._library:
-                self._advance(1)
+                if self.repeat == 'one':
+                    self._start_track(self._index)
+                else:
+                    view = self.view_indices()
+                    at_end = bool(view) and self._index == view[-1]
+                    if self.repeat == 'off' and at_end:
+                        self._is_playing = False
+                        self._status = 'stopped'
+                    else:
+                        self._advance(1)
         elif self._status == 'paused':
             pass
         else:
@@ -678,6 +699,54 @@ class MediaController:
             pos = 0                        # current track fell out of the view
         self._start_track(view[pos])
 
+    def toggle_ambience(self) -> str:
+        """Checkbox: the corner 'now spinning' platter on the main output."""
+        self.ambience_enabled = not self.ambience_enabled
+        return ('Media: platter ambience on' if self.ambience_enabled
+                else 'Media: platter ambience off')
+
+    def render_overlay(self, width: int, height: int, dt: float,
+                       *args: Any) -> None:  # noqa: ARG002
+        """Main-output overlay hook: the corner platter while playing."""
+        if not self.enabled or not self.ambience_enabled or not self._is_playing:
+            return
+        if self._ambience is None:
+            try:
+                import importlib.util as _ilu  # noqa: PLC0415
+
+                ctx = getattr(getattr(self._app, 'vj_api', None), 'ctx', None)
+                if ctx is None:
+                    return
+                _pp = Path(__file__).resolve().parent / 'ambience.py'
+                _spec = _ilu.spec_from_file_location('media_ambience', _pp)
+                _mod = _ilu.module_from_spec(_spec)
+                _spec.loader.exec_module(_mod)
+                from PIL import ImageFont  # noqa: PLC0415
+
+                def _font(size):
+                    for p in ('/usr/share/fonts/liberation-mono-fonts/'
+                              'LiberationMono-Bold.ttf',
+                              '/usr/share/fonts/liberation-mono/'
+                              'LiberationMono-Bold.ttf'):
+                        try:
+                            return ImageFont.truetype(p, size)
+                        except Exception:
+                            continue
+                    return ImageFont.load_default()
+
+                corner = str(self._cfg.get('ambience_corner', 'br') or 'br')
+                self._ambience = _mod.MediaAmbience(ctx, _font(14), _font(11),
+                                                    corner=corner)
+                log.info('media-01: platter ambience ready (%s corner)', corner)
+            except Exception as exc:
+                self.ambience_enabled = False   # fail once, quietly
+                log.warning('media-01: ambience unavailable: %s', exc)
+                return
+        try:
+            self._ambience.render(int(width), int(height), self.snapshot())
+        except Exception as exc:
+            log.debug('media-01: ambience render failed: %s', exc)
+
     # -- Media Deck window (Shift+L) ------------------------------------------
 
     @property
@@ -768,6 +837,12 @@ class MediaController:
             except Exception:
                 pass
         self.close_window()
+        if self._ambience is not None:
+            try:
+                self._ambience.release()
+            except Exception:
+                pass
+            self._ambience = None
         if self._backend is not None:
             self._backend.shutdown()
             self._backend = None
@@ -828,6 +903,8 @@ class MediaController:
             'library_size': len(self._library),
             'library_index': self._index,
             'shuffle': self._shuffle,
+            'repeat': self.repeat,
+            'ambience': self.ambience_enabled,
             'keep_playing_on_close': self.keep_playing_on_close,
         }
 

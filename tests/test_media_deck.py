@@ -408,3 +408,86 @@ def test_sort_orders_the_library_view(tmp_path) -> None:
     names = [n for _, n in ctl.view_rows()]
     assert names == sorted(names, reverse=True)
     ctl.shutdown()
+
+
+def test_repeat_modes_cycle_and_govern_auto_advance(tmp_path) -> None:
+    ctl = _real_controller(tmp_path, ['a.wav', 'b.wav'])
+    assert ctl.repeat == 'all'
+    assert 'ONE' in ctl.cycle_repeat()
+    assert 'OFF' in ctl.cycle_repeat()
+    assert 'ALL' in ctl.cycle_repeat()
+    # Simulate end-of-track auto-advance in each mode.
+    ctl.play_index(1)                                  # last row of the view
+
+    class _Ended:
+        can_seek = can_volume = False
+
+        def is_playing(self):
+            return False
+
+        def is_ended(self):
+            return True
+
+        def pause(self):
+            pass
+
+        def play(self, path, duration_s=0.0):
+            self.last = str(path)
+
+        def position_s(self):
+            return 0.0
+
+        def duration_s(self):
+            return 0.0
+
+        def set_volume(self, v):
+            pass
+
+        def shutdown(self):
+            pass
+
+    ctl._backend = _Ended()
+    ctl._status = 'playing'
+    ctl.update(0.1, None)                              # ALL: wraps to a.wav
+    assert ctl._backend.last.endswith('a.wav')
+    ctl.repeat = 'one'
+    ctl._status = 'playing'
+    ctl.update(0.1, None)                              # ONE: restarts a.wav
+    assert ctl._backend.last.endswith('a.wav')
+    ctl.repeat = 'off'
+    ctl.play_index(1)                                  # back to the last row
+    ctl._status = 'playing'
+    del ctl._backend.last
+    ctl.update(0.1, None)                              # OFF at end: stops
+    assert not hasattr(ctl._backend, 'last')
+    assert ctl._status == 'stopped'
+    ctl.shutdown()
+
+
+def test_repeat_button_region_cycles(monkeypatch) -> None:
+    ctl = _StubController()
+    ctl.calls_repeat = 0
+
+    def cyc():
+        ctl.calls_repeat += 1
+
+    ctl.cycle_repeat = cyc
+    win = _window(ctl)
+    win._click(*_mid(_region(win, 'repeat')), 1)
+    assert ctl.calls_repeat == 1
+    win.close_now()
+
+
+def test_ambience_card_rasterizes_headlessly() -> None:
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('amb', _ROOT / 'ambience.py')
+    amb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(amb)
+    from PIL import ImageFont
+    card = amb.MediaAmbience.__new__(amb.MediaAmbience)   # skip GL __init__
+    card._font_b = ImageFont.load_default()
+    card._font_s = ImageFont.load_default()
+    img = card._build_card({'title': 'Better Off Alone', 'artist': 'Alice DJ',
+                            'position_s': 42.0, 'duration_s': 215.0})
+    assert img.size == (300, 120)
+    assert img.getbbox() is not None                     # actually drew pixels

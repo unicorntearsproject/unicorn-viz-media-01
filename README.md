@@ -1,7 +1,7 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.10.0
+Version: 0.11.0
 Status: beta
 Last updated: 2026-06-29
 
@@ -84,6 +84,16 @@ media-01 is paused/stopped, the Spotify track (if playing) takes the band.
 Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
+
+- **0.11.0** — **Loop button + platter ambience.** A **repeat toggle** sits
+  next to shuffle (circular-arrow icon): **ALL** wraps the active
+  playlist/crate (default), **ONE** repeats the current track, **OFF** stops
+  at the end of the view (`repeat` config sets the startup mode).  And the
+  **corner platter ambience**: while music plays, a mini neon platter card
+  (glow, grooves, strobe spoke, rim progress dot, "NOW SPINNING" +
+  title/artist) floats on the **main visualizer output**, projectM-overlay
+  style — toggled by a checkbox in the Deck (`ambience` config default on,
+  `ambience_corner` = br/bl/tr/tl).
 
 - **0.10.0** — **Playlists, accordion crates, sort & excludes.** The Media
   Deck library gains **LIBRARY | PLAYLISTS tabs**: playlists (the mixer's
