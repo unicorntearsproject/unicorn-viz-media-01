@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.15.0'
+__version__ = '0.15.1'
 
 import logging
 import os
@@ -116,7 +116,11 @@ class _VlcBackend:
     def __init__(self, volume: int) -> None:
         import vlc  # noqa: PLC0415
         self._vlc = vlc
-        args = ['--no-video', '--quiet']
+        # --aout=pulse: route through PulseAudio (pipewire-pulse on modern
+        # Linux).  VLC's native PipeWire output module segfaults in
+        # pw_thread_loop_lock when audio_set_volume races output creation
+        # (observed crash 2026-07-16); the pulse module handles it safely.
+        args = ['--no-video', '--quiet', '--aout=pulse']
         self._instance = vlc.Instance(args)
         # Two players so tracks can overlap for a true crossfade: the active
         # one carries the current track; the other fades the old one out.
@@ -125,9 +129,10 @@ class _VlcBackend:
         self._active = 0
         self._volume = max(0, min(200, volume))
         self._fade: list | None = None    # [elapsed_s, fade_s, outgoing idx]
-        # Do NOT set volume here: libvlc's PipeWire output module can
-        # segfault when audio_set_volume runs on a player that has never
-        # had media/an audio output.  Volume is applied in play().
+        self._pending_volume = False      # apply volume once playback clock runs
+        # Never set volume on a player without a live audio output: libvlc
+        # aout modules can crash (see --aout=pulse note above).  Volume is
+        # deferred to tick() after the playback clock starts.
 
     @property
     def _player(self):
@@ -138,7 +143,9 @@ class _VlcBackend:
         media = self._instance.media_new(str(path))
         self._player.set_media(media)
         self._player.play()
-        self._player.audio_set_volume(self._volume)
+        # Volume applies in tick() once get_time() advances: play() is async
+        # and the audio output does not exist yet at this point.
+        self._pending_volume = True
 
     can_crossfade = True
 
@@ -154,7 +161,10 @@ class _VlcBackend:
             inc = self._players[1 - out_idx]
             inc.set_media(self._instance.media_new(str(path)))
             inc.play()
-            inc.audio_set_volume(0)
+            try:
+                inc.audio_set_volume(0)   # start silent; ramp brings it up
+            except Exception:
+                pass
             self._end_fade(hard=True)     # collapse any fade already running
             self._active = 1 - out_idx
             self._fade = [0.0, max(0.2, float(fade_s)), out_idx]
@@ -163,7 +173,14 @@ class _VlcBackend:
             return False
 
     def tick(self, dt: float) -> None:
-        """Advance the crossfade ramp (called every frame while fading)."""
+        """Apply deferred volume + advance the crossfade ramp (every frame)."""
+        if self._pending_volume:
+            try:
+                if self._player.get_time() > 0:   # audio output is live now
+                    self._player.audio_set_volume(self._volume)
+                    self._pending_volume = False
+            except Exception:
+                self._pending_volume = False
         if self._fade is None:
             return
         self._fade[0] += max(0.0, float(dt))
@@ -216,10 +233,17 @@ class _VlcBackend:
 
     def set_volume(self, volume: int) -> None:
         self._volume = max(0, min(200, volume))
-        # Mid-fade tick() re-applies the ramp; a media-less player never gets
-        # a volume call (libvlc PipeWire aout segfaults without an output).
-        if self._fade is None and self._player.get_media() is not None:
-            self._player.audio_set_volume(self._volume)
+        # Mid-fade tick() re-applies the ramp.  Before the playback clock
+        # starts the aout may not exist (crash risk) — defer to tick().
+        if self._fade is not None:
+            return
+        try:
+            if self._player.get_time() > 0:
+                self._player.audio_set_volume(self._volume)
+            else:
+                self._pending_volume = True
+        except Exception:
+            self._pending_volume = True
 
     can_seek = True
     can_volume = True

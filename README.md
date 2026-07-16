@@ -1,7 +1,7 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.15.0
+Version: 0.15.1
 Status: beta
 Last updated: 2026-06-29
 
@@ -85,6 +85,7 @@ Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
 
+- **0.15.1** — Fix the VLC startup/play segfault for real: force the PulseAudio output (`--aout=pulse`, served by pipewire-pulse) whose volume path is race-safe, and defer every volume call until the playback clock is running (VLC’s native PipeWire output crashed in pw_thread_loop_lock when audio_set_volume raced output creation)
 - **0.15.0** — **Favorites**: heart any track (row ♥ or right-click), new **♥ FAVS** tab next to LIBRARY/PLAYLISTS, persisted with the playlists store; checkbox fixes (one shared widget, bigger hit targets, no transport overlap at small sizes); **VLC startup segfault fix** — volume is never set on a media-less player (libvlc's PipeWire output crashed at init)
 - **0.14.0** — **Nested accordion crates** (sub-folders expand along the open path, depth-tinted headers, `crate_depth` config, default 5); session prefs persist (repeat/shuffle/crossfade/volume/mode/playlist/track); stable list scrolling — double-clicking a row now plays that row (clicks no longer recenter the list)
 - **0.13.0** — **Delete file** in the track context menu (arms a SURE?
