@@ -241,3 +241,64 @@ def test_controller_surface_play_index_and_names(tmp_path) -> None:
     ctl.seek_to(42.0)
     assert ctl._backend.sought == 42.0
     ctl.shutdown()
+
+
+def test_keep_playing_checkbox_toggles_and_close_respects_it(tmp_path) -> None:
+    class _App:
+        vj_api = None
+
+    ctl = _mc.MediaController(_App(), {'enabled': True,
+                                       'media_dir': str(tmp_path)})
+
+    class _Backend:
+        can_seek = can_volume = False
+
+        def __init__(self):
+            self.playing = True
+            self.paused = False
+
+        def is_playing(self):
+            return self.playing and not self.paused
+
+        def pause(self):
+            self.paused = True
+
+        def is_ended(self):
+            return False
+
+        def position_s(self):
+            return 0.0
+
+        def duration_s(self):
+            return 0.0
+
+        def set_volume(self, v):
+            pass
+
+        def shutdown(self):
+            pass
+
+    ctl._backend = _Backend()
+    ctl._status = 'playing'
+    assert ctl.keep_playing_on_close is True          # default: remote control
+    ctl.close_window()
+    assert ctl._backend.paused is False               # music survives the close
+    ctl.toggle_keep_playing()
+    assert ctl.keep_playing_on_close is False
+    ctl.close_window()
+    assert ctl._backend.paused is True                # opt-in stop-on-close
+    ctl._backend.shutdown()
+
+
+def test_keep_toggle_region_drives_the_controller() -> None:
+    ctl = _StubController()
+    ctl.keep_playing_on_close = True
+
+    def toggle():
+        ctl.calls.append('keep')
+
+    ctl.toggle_keep_playing = toggle
+    win = _window(ctl)
+    win._click(*_mid(_region(win, 'keep_toggle')), 1)
+    assert 'keep' in ctl.calls
+    win.close_now()

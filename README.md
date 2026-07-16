@@ -1,7 +1,7 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.9.0
+Version: 0.9.1
 Status: beta
 Last updated: 2026-06-29
 
@@ -84,6 +84,11 @@ media-01 is paused/stopped, the Spotify track (if playing) takes the band.
 Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
+
+- **0.9.1** — The Media Deck is a **remote control, not the player**: closing
+  the window keeps the music playing (new default), with an in-window
+  **"keep playing when window is closed" checkbox** to opt into stop-on-close
+  instead (`keep_playing_on_close` config sets the startup default).
 
 - **0.9.0** — **Beta: the Media Deck window** (`Shift+L`), a single-deck
   sibling of the DJ mixer's board in the same visual language: a **big neon

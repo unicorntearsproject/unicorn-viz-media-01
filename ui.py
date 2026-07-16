@@ -327,6 +327,8 @@ class MediaDeckWindow:
                 self._c.toggle_shuffle()
             elif action == 'focus_search':
                 self._search_focused = True
+            elif action == 'keep_toggle':
+                self._c.toggle_keep_playing()
             elif action == 'seek' and getattr(self._c, 'can_seek', False):
                 x0, x1, dur = payload
                 frac = min(1.0, max(0.0, (x - x0) / max(1, x1 - x0)))
@@ -469,6 +471,21 @@ class MediaDeckWindow:
                 d.rectangle([bx, cy + 12, bx + vw, cy + 22], fill=_HOT)
             d.text((bx, cy + 24), f'{vol}%', font=self._font_s, fill=_FAINT)
             regions.append((bx, cy + 6, vx1, cy + 28, 'volume', (bx, vx1)))
+
+        # Keep-playing-on-close checkbox (the window is a remote control —
+        # by default the music continues when you dismiss it).
+        keep = bool(snap.get('keep_playing_on_close', True))
+        kb_y = h - gap - 22
+        d.rectangle([lx0 + 6, kb_y, lx0 + 18, kb_y + 12],
+                    fill=_HOT if keep else (0, 0, 0, 90),
+                    outline=_HOT if keep else _DIM)
+        if keep:
+            d.line([lx0 + 8, kb_y + 6, lx0 + 11, kb_y + 9], fill=(4, 18, 26, 255))
+            d.line([lx0 + 11, kb_y + 9, lx0 + 16, kb_y + 3], fill=(4, 18, 26, 255))
+        d.text((lx0 + 24, kb_y + 1), 'keep playing when window is closed',
+               font=self._font_s, fill=_TEXT if keep else _DIM)
+        regions.append((lx0 + 6, kb_y - 3, lx0 + 240, kb_y + 15,
+                        'keep_toggle', None))
 
         # Library pane (right column).
         d.rectangle([rx0 - 4, top, rx1 + 4, h - gap],

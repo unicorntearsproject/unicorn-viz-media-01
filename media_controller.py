@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.9.0'
+__version__ = '0.9.1'
 
 import logging
 import os
@@ -393,6 +393,11 @@ class MediaController:
                 log.debug('media-01: now-playing registration failed: %s', exc)
 
         self._window = None       # Media Deck window (Shift+L)
+        # Closing the Media Deck leaves the music playing by default (the
+        # window is a remote control, not the player).  The in-window checkbox
+        # toggles this; config sets the startup default.
+        self.keep_playing_on_close = bool(
+            self._cfg.get('keep_playing_on_close', True))
 
     # ------------------------------------------------------------------
     # Public control surface
@@ -584,7 +589,22 @@ class MediaController:
                 except Exception:
                     pass
 
+    def toggle_keep_playing(self) -> str:
+        """Checkbox in the Media Deck: keep playing after the window closes."""
+        self.keep_playing_on_close = not self.keep_playing_on_close
+        return ('Media: keeps playing when closed'
+                if self.keep_playing_on_close else 'Media: stops when closed')
+
     def close_window(self) -> None:
+        if (not self.keep_playing_on_close and self._backend is not None
+                and self._backend.is_playing()):
+            try:
+                self._backend.pause()
+                self._is_playing = False
+                self._status = 'paused'
+                log.info('media-01: paused on window close')
+            except Exception:
+                pass
         win = self._window
         self._window = None
         if win is not None:
@@ -683,6 +703,7 @@ class MediaController:
             'library_size': len(self._library),
             'library_index': self._index,
             'shuffle': self._shuffle,
+            'keep_playing_on_close': self.keep_playing_on_close,
         }
 
     # ------------------------------------------------------------------
