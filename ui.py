@@ -122,6 +122,7 @@ class MediaDeckWindow:
         self._font_h = _font(16)
         self._font_b = _font(12)
         self._font_s = _font(10)
+        self._font_heart = _font(15)
 
         self._create_window()
         self._thread_stop = threading.Event()
@@ -687,7 +688,7 @@ class MediaDeckWindow:
         ty = top + 6
         tabx = rx0 + 4
         for label, m in (('LIBRARY', 'library'), ('PLAYLISTS', 'playlists'),
-                         ('♥ FAVS', 'favorites')):
+                         ('♥ FAVS', 'favorites')):  # heart sized by tab font
             on = mode == m
             tw2 = len(label) * 6 + 16
             if on:
@@ -799,13 +800,13 @@ class MediaDeckWindow:
                             fill=(0, 45, 90, 255))
                 d.text((rx0 + 2, ry), '►', font=self._font_s, fill=_HOT)
             ncol = _WAVE_HI if is_live else (_TEXT if is_sel else _DIM)
-            maxr = max(8, (rx1 - rx0 - 34) // 6)
+            maxr = max(8, (rx1 - rx0 - 40) // 6)
             label = name if len(name) <= maxr else name[:maxr - 1] + '…'
             d.text((rx0 + 14, ry), label, font=self._font_s, fill=ncol)
             fav = bool(getattr(self._c, 'is_favorite', lambda _i: False)(idx))
-            d.text((rx1 - 16, ry), '♥', font=self._font_s,
-                   fill=(255, 80, 160, 255) if fav else (40, 50, 72, 255))
-            regions.append((rx1 - 20, ry - 1, rx1 - 4, ry + row_h - 3,
+            d.text((rx1 - 21, ry - 2), '♥', font=self._font_heart,
+                   fill=(255, 80, 160, 255) if fav else (46, 58, 84, 255))
+            regions.append((rx1 - 26, ry - 1, rx1 - 3, ry + row_h - 3,
                             'fav_toggle', idx))
             rows.append((rx0, ry - 1, rx1, ry + row_h - 3, i))
         if not view and mode == 'favorites':
