@@ -92,6 +92,14 @@ def _read_tags(path: Path) -> dict[str, str]:
     return {'title': title, 'artist': artist, 'album': album, 'duration_s': duration_s}
 
 
+# Background library-scan cache, keyed by resolved media-dir string.  Populated
+# by MediaController.prescan_async() so the ~842-track walk+tag-read (the
+# controller's biggest startup cost, ~0.6s) overlaps the app's splash screen
+# instead of stalling boot after it.  Mirrors ImageShowcase's prefetch cache.
+_LIBRARY_SCAN_CACHE: dict[str, list[dict[str, Any]]] = {}
+_LIBRARY_SCAN_LOCK = threading.Lock()
+
+
 def _scan_library(directory: Path) -> list[dict[str, Any]]:
     """Walk *directory* and return a list of track metadata dicts."""
     tracks: list[dict[str, Any]] = []
@@ -391,17 +399,48 @@ class MediaController:
     used internally.
     """
 
+    @staticmethod
+    def _resolve_media_dir(cfg: dict[str, Any]) -> Path:
+        """Resolve the media directory from config (or the bundled default)."""
+        raw_dir = str((cfg or {}).get('media_dir', '') or '').strip()
+        if raw_dir:
+            return Path(raw_dir).expanduser()
+        return Path(__file__).parent / 'media'
+
+    @classmethod
+    def prescan_async(cls, cfg: dict[str, Any]) -> None:
+        """Walk + tag-read the media library on a background thread.
+
+        Called from app startup *before* the splash screen so the scan (the
+        controller's dominant construction cost) overlaps the splash instead
+        of stalling boot after it.  No SDL/GL/VLC — pure disk I/O + tag
+        reads, safe off the main thread.  ``rescan_library`` later finds the
+        result already cached and skips the walk.  Mirrors
+        ``ImageShowcase.prefetch_async``.
+        """
+        if not bool((cfg or {}).get('enabled', False)):
+            return
+        media_dir = cls._resolve_media_dir(cfg)
+        key = str(media_dir.resolve()) if media_dir.exists() else str(media_dir)
+        with _LIBRARY_SCAN_LOCK:
+            if key in _LIBRARY_SCAN_CACHE:
+                return
+
+        def _scan() -> None:
+            tracks = _scan_library(media_dir)
+            with _LIBRARY_SCAN_LOCK:
+                _LIBRARY_SCAN_CACHE.setdefault(key, tracks)
+            log.info('media-01: prescanned %d track(s) from %s', len(tracks), media_dir)
+
+        threading.Thread(target=_scan, daemon=True, name='media-prescan').start()
+
     def __init__(self, app: Any, cfg: dict[str, Any] | None = None) -> None:
         self._app = app
         self._cfg = dict(cfg or {})
 
         self.enabled: bool = bool(self._cfg.get('enabled', False))
 
-        raw_dir = str(self._cfg.get('media_dir', '') or '').strip()
-        if raw_dir:
-            self._media_dir = Path(raw_dir).expanduser()
-        else:
-            self._media_dir = Path(__file__).parent / 'media'
+        self._media_dir = self._resolve_media_dir(self._cfg)
 
         self._shuffle: bool = bool(self._cfg.get('shuffle', True))
         self._volume: int = max(0, min(200, int(self._cfg.get('volume', 100) or 100)))
@@ -890,7 +929,14 @@ class MediaController:
         media dir, '/'-joined, truncated to ``crate_depth`` (default 5).
         """
         depth = max(1, int(self._cfg.get('crate_depth', 5) or 5))
-        self._library = _scan_library(self._media_dir)
+        # Prefer a background prescan result (kicked off during the splash) to
+        # avoid re-walking the library on the main thread; fall back to a
+        # synchronous scan when no prescan ran (e.g. a runtime rescan).
+        key = str(self._media_dir.resolve()) if self._media_dir.exists() else str(self._media_dir)
+        cached: list[dict[str, Any]] | None
+        with _LIBRARY_SCAN_LOCK:
+            cached = _LIBRARY_SCAN_CACHE.pop(key, None)
+        self._library = cached if cached is not None else _scan_library(self._media_dir)
         for t in self._library:
             try:
                 rel = Path(t['path']).relative_to(self._media_dir)
