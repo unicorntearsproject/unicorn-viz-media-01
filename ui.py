@@ -15,9 +15,11 @@ PIL, hit regions published under a frame lock, and
 from __future__ import annotations
 
 import ctypes
+import importlib.util
 import logging
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -38,6 +40,19 @@ except Exception:  # pragma: no cover
 # Palette — the dj-mixer-01 board language (kept in sync by eye, not import:
 # drop-ins stay independent).
 _BG      = (8, 10, 18, 255)
+
+# Tag read/write (optional: the editor simply disappears without mutagen).  A
+# deliberate copy of the dj-mixer-01 module -- the two drop-ins run in
+# isolation, so each carries its own.
+try:
+    _tg_spec = importlib.util.spec_from_file_location(
+        'media_tags_ui', Path(__file__).resolve().parent / 'tags.py')
+    _tags_mod = importlib.util.module_from_spec(_tg_spec)
+    _tg_spec.loader.exec_module(_tags_mod)
+except Exception as _exc:  # pragma: no cover - tag editing just vanishes
+    logging.getLogger(__name__).warning(
+        'media-01: tag editing unavailable: %s', _exc)
+    _tags_mod = None
 _PANEL   = (16, 20, 34, 255)
 _PANEL2  = (22, 26, 44, 255)
 _EDGE    = (0, 180, 255, 255)
@@ -112,6 +127,8 @@ class MediaDeckWindow:
         self._close_confirm_deadline = 0.0
         self._menu: dict | None = None      # right-click context menu
         self._menu_rects: list = []
+        self._tag_edit: dict | None = None  # open tag editor
+        self._tag_rects: list = []
         self._pl_open = False               # playlist picker flyout
         self._sort_open = False             # sort flyout
         self._frame_id = 0
@@ -263,6 +280,9 @@ class MediaDeckWindow:
                 and event.button.button == sdl2.SDL_BUTTON_LEFT):
             bx = int(event.button.x * self._mouse_scale_x)
             by = int(event.button.y * self._mouse_scale_y)
+            if self._tag_edit is not None:
+                self._click_tag_editor(bx, by)
+                return
             if self._menu is not None:
                 self._click_menu(bx, by)
                 return
@@ -270,6 +290,9 @@ class MediaDeckWindow:
             return
 
     def _on_key(self, sym: int, mod: int, repeat: bool) -> None:  # noqa: ARG002
+        if self._tag_edit is not None:
+            self._tag_edit_key(sym, mod)
+            return
         if self._search_focused and self._search_key(sym):
             return
         if sym == sdl2.SDLK_ESCAPE:
@@ -449,8 +472,122 @@ class MediaDeckWindow:
         if hasattr(self._c, 'is_favorite'):
             fav = bool(self._c.is_favorite(idx))
             items.append(('Unfavorite ♥' if fav else 'Favorite ♥', 'fav', idx))
+        if _tags_mod is not None and hasattr(self._c, 'snapshot_path_at'):
+            tp = self._c.snapshot_path_at(idx)
+            if tp and _tags_mod.can_edit(tp):
+                items.append(('Edit tags…', 'tag_edit', idx))
         items.append(('Delete file…', 'del_arm', idx))
         self._menu = {'x': x, 'y': y, 'name': name, 'items': items}
+
+    def _tag_edit_key(self, sym: int, mod: int) -> None:
+        """Keystrokes while the tag editor is open (Tab/arrows move, Enter
+        saves, Esc cancels).  ASCII only -- the console font has no wider set."""
+        ed = self._tag_edit
+        if ed is None or _tags_mod is None:
+            return
+        fields = _tags_mod.TAG_FIELDS
+        if sym == sdl2.SDLK_ESCAPE:
+            self._tag_edit = None
+            return
+        if sym in (sdl2.SDLK_RETURN, sdl2.SDLK_KP_ENTER):
+            self._tag_edit_save()
+            return
+        if sym in (sdl2.SDLK_TAB, sdl2.SDLK_DOWN):
+            ed['focus'] = (ed['focus'] + 1) % len(fields)
+            return
+        if sym == sdl2.SDLK_UP:
+            ed['focus'] = (ed['focus'] - 1) % len(fields)
+            return
+        key = fields[ed['focus'] % len(fields)]
+        cur = ed['fields'].get(key, '')
+        if sym == sdl2.SDLK_BACKSPACE:
+            ed['fields'][key] = cur[:-1]
+        elif 32 <= sym < 127:
+            ch = chr(sym)
+            if mod & (sdl2.KMOD_LSHIFT | sdl2.KMOD_RSHIFT):
+                ch = ch.upper()
+            ed['fields'][key] = cur + ch
+        else:
+            return
+        ed['msg'] = ''
+
+    def _tag_edit_save(self) -> None:
+        ed = self._tag_edit
+        if ed is None or _tags_mod is None:
+            return
+        ok, msg = _tags_mod.write_tags(ed['path'], ed['fields'])
+        if not ok:
+            ed['msg'] = msg
+            return
+        if hasattr(self._c, 'rescan_library'):
+            try:                               # the row's name moved
+                self._c.rescan_library()
+            except Exception as exc:
+                log.warning('media-deck: rescan after tag edit: %s', exc)
+        self._tag_edit = None
+
+    def _click_tag_editor(self, x: int, y: int) -> None:
+        ed = self._tag_edit
+        if ed is None:
+            return
+        with self._frame_lock:
+            hit = next((r for r in self._tag_rects
+                        if r[0] <= x <= r[2] and r[1] <= y <= r[3]), None)
+        if hit is None:
+            return                             # modal: outside clicks do nothing
+        action, payload = hit[4], hit[5]
+        if action == 'tag_focus':
+            ed['focus'] = int(payload)
+        elif action == 'tag_save':
+            self._tag_edit_save()
+        elif action == 'tag_cancel':
+            self._tag_edit = None
+
+    def _draw_tag_editor(self, d, w, h) -> list:
+        """The tag-edit modal; returns its click rects."""
+        ed = self._tag_edit
+        if ed is None or _tags_mod is None:
+            return []
+        fields = _tags_mod.TAG_FIELDS
+        pw, rowh = 440, 26
+        ph = 60 + rowh * len(fields) + 44
+        x0 = max(8, (w - pw) // 2)
+        y0 = max(8, (h - ph) // 2)
+        tr: list = []
+        d.rectangle([x0 - 2, y0 - 2, x0 + pw + 2, y0 + ph + 2], outline=_EDGE)
+        d.rectangle([x0, y0, x0 + pw, y0 + ph], fill=_PANEL, outline=_HOT)
+        d.text((x0 + 14, y0 + 10), 'EDIT TAGS', font=self._font_b, fill=_WAVE_HI)
+        d.text((x0 + 14, y0 + 30), Path(str(ed['path'])).name[:54],
+               font=self._font_s, fill=_FAINT)
+        yy = y0 + 54
+        for i, key in enumerate(fields):
+            label = _tags_mod.FIELD_LABELS.get(key, key.upper())
+            focused = (ed['focus'] % len(fields)) == i
+            d.text((x0 + 14, yy + 6), f'{label:>6s}', font=self._font_s,
+                   fill=_TEXT if focused else _DIM)
+            bx0, bx1 = x0 + 72, x0 + pw - 14
+            d.rectangle([bx0, yy, bx1, yy + rowh - 4], fill=_BG,
+                        outline=_EDGE if focused else _FAINT)
+            val = str(ed['fields'].get(key, ''))[-54:]
+            d.text((bx0 + 6, yy + 6), val, font=self._font_s,
+                   fill=_TEXT if focused else _DIM)
+            if focused:
+                cx = bx0 + 6 + len(val) * 6
+                d.rectangle([cx, yy + 5, cx + 1, yy + rowh - 9], fill=_HOT)
+            tr.append((bx0, yy, bx1, yy + rowh - 4, 'tag_focus', i))
+            yy += rowh
+        if ed.get('msg'):
+            d.text((x0 + 14, yy + 2), str(ed['msg'])[:58], font=self._font_s,
+                   fill=_WARN)
+        yy += 16
+        for lab, act, col in (('SAVE', 'tag_save', _HOT),
+                              ('CANCEL', 'tag_cancel', _DIM)):
+            bw = len(lab) * 6 + 20
+            bx = (x0 + pw - 14 - bw) if act == 'tag_save' else (x0 + 14)
+            d.rectangle([bx, yy, bx + bw, yy + 20], fill=_BG, outline=col)
+            d.text((bx + 10, yy + 5), lab, font=self._font_s, fill=col)
+            tr.append((bx, yy, bx + bw, yy + 20, act, None))
+        return tr
 
     def _click_menu(self, x: int, y: int) -> None:
         menu = self._menu
@@ -487,6 +624,14 @@ class MediaDeckWindow:
                 self._menu = None
             elif action == 'fav':
                 self._c.toggle_favorite(payload)
+                self._menu = None
+            elif action == 'tag_edit':
+                path = (self._c.snapshot_path_at(payload)
+                        if hasattr(self._c, 'snapshot_path_at') else None)
+                if path and _tags_mod is not None:
+                    self._tag_edit = {'path': path,
+                                      'fields': _tags_mod.read_tags(path),
+                                      'focus': 0, 'msg': ''}
                 self._menu = None
             elif action == 'del_arm':      # arm: the next click really deletes
                 menu['items'] = [('SURE? DELETE FILE', 'del_do', payload),
@@ -877,10 +1022,15 @@ class MediaDeckWindow:
             d.text((16, h - 26), 'Press ESC again to close the media deck',
                    font=self._font_b, fill=_WARN)
 
+        tag_rects: list = []
+        if self._tag_edit is not None:      # modal: drawn last, over everything
+            tag_rects = self._draw_tag_editor(d, w, h)
+
         with self._frame_lock:
             self._regions = regions
             self._rows = rows
             self._menu_rects = menu_rects
+            self._tag_rects = tag_rects
         return img
 
     def _draw_platter(self, d, cx, cyc, r, playing, pos, dur) -> None:

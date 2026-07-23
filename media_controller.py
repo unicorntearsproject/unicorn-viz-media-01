@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.15.2'
+__version__ = '0.16.0'
 
 import logging
 import os

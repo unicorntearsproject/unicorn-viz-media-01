@@ -585,3 +585,68 @@ def test_favorites_toggle_view_and_persistence(tmp_path) -> None:
     reloaded = _pl.MediaPlaylists(tmp_path / 'pl.json')
     assert reloaded.favorites == {ctl.snapshot_path_at(ib)}
     assert reloaded.prefs.get('mode') == 'favorites'
+
+
+def test_tag_editor_writes_and_leaves_the_audio_untouched(tmp_path) -> None:
+    """media-01's copy of the tag editor: metadata only, audio untouched, and
+    the library rescans so the row's name updates."""
+    sf = pytest.importorskip('soundfile')
+    _tg = _load('tags')
+    if not _tg.available():
+        pytest.skip('mutagen not installed')
+    import numpy as np
+
+    f = tmp_path / 'song.flac'
+    sf.write(str(f), np.zeros((48_000, 2), dtype='float32'), 48_000)
+
+    def _decoded():
+        data, _ = sf.read(str(f), dtype='float32', always_2d=True)
+        return np.ascontiguousarray(data)
+
+    class _Ctl(_StubController):
+        def __init__(self):
+            super().__init__(1)
+            self.rescanned = 0
+        def snapshot_path_at(self, i):
+            return str(f)
+        def rescan_library(self):
+            self.rescanned += 1
+
+    ctl = _Ctl()
+    win = _window(ctl)
+    before = _decoded()
+
+    # Open via the real context-menu action path.
+    win._tag_edit = {'path': str(f),
+                     'fields': {k: '' for k in _tg.TAG_FIELDS},
+                     'focus': 0, 'msg': ''}
+    for ch in 'abc':
+        win._tag_edit_key(ord(ch), 0)            # focus 0 = artist
+    win._tag_edit_key(sdl2.SDLK_TAB, 0)          # -> title
+    for ch in 'xy':
+        win._tag_edit_key(ord(ch), 0)
+    win._tag_edit_save()
+
+    assert win._tag_edit is None                 # closed on success
+    assert ctl.rescanned == 1                    # library refreshed
+    got = _tg.read_tags(f)
+    assert got['artist'] == 'abc' and got['title'] == 'xy'
+    assert np.array_equal(_decoded(), before)    # audio identical
+    win.close_now() if hasattr(win, 'close_now') else None
+
+
+def test_tag_editor_escape_cancels(tmp_path) -> None:
+    sf = pytest.importorskip('soundfile')
+    _tg = _load('tags')
+    if not _tg.available():
+        pytest.skip('mutagen not installed')
+    import numpy as np
+    f = tmp_path / 's.flac'
+    sf.write(str(f), np.zeros((48_000, 2), dtype='float32'), 48_000)
+    _tg.write_tags(f, {'artist': 'Keep'})
+    win = _window()
+    win._tag_edit = {'path': str(f), 'fields': {'artist': 'Discard'},
+                     'focus': 0, 'msg': ''}
+    win._tag_edit_key(sdl2.SDLK_ESCAPE, 0)
+    assert win._tag_edit is None
+    assert _tg.read_tags(f)['artist'] == 'Keep'

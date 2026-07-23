@@ -85,6 +85,8 @@ Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
 
+- **0.16.0** — **In-app tag editing.** Right-click a library track → **Edit tags…** to fix artist / title / album / genre / year without leaving the media deck. The write touches only the file's metadata — the audio is never re-encoded — and the library rescans so the row name updates. WAV/AIFF are skipped (no portable tag format). This is a deliberate copy of the dj-mixer-01 tag module; the two drop-ins run in isolation so each carries its own.
+
 - **0.15.2** — Bigger favorite hearts in the library rows (15px, wider click target)
 - **0.15.1** — Fix the VLC startup/play segfault for real: force the PulseAudio output (`--aout=pulse`, served by pipewire-pulse) whose volume path is race-safe, and defer every volume call until the playback clock is running (VLC’s native PipeWire output crashed in pw_thread_loop_lock when audio_set_volume raced output creation)
 - **0.15.0** — **Favorites**: heart any track (row ♥ or right-click), new **♥ FAVS** tab next to LIBRARY/PLAYLISTS, persisted with the playlists store; checkbox fixes (one shared widget, bigger hit targets, no transport overlap at small sizes); **VLC startup segfault fix** — volume is never set on a media-less player (libvlc's PipeWire output crashed at init)
