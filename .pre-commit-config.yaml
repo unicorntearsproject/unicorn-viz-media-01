@@ -13,14 +13,33 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+      - id: pytest-dropin
+        name: pytest (this drop-in's own suite)
+        # The main-repo suite above collects ZERO tests from this directory --
+        # this drop-in's own tests never ran on its own commit, so a change
+        # here could break it outright and still go green.
+        entry: bash -c 'cd "$(git rev-parse --show-toplevel)" && ../../.venv/bin/python -m pytest -q'
+        language: system
+        pass_filenames: false
+        always_run: true
       - id: ruff
         name: ruff (unicorn-viz main-repo suite)
         entry: bash -c 'cd "$(git rev-parse --show-toplevel)/../.." && .venv/bin/ruff check unicornviz/ tests/'
         language: system
         pass_filenames: false
         always_run: true
+      - id: ruff-dropin
+        name: ruff (this drop-in)
+        # The hook above lints the *core* package only; this drop-in was never
+        # linted by anything.
+        entry: bash -c 'cd "$(git rev-parse --show-toplevel)" && ../../.venv/bin/ruff check .'
+        language: system
+        pass_filenames: false
+        always_run: true
       - id: bandit
         name: bandit (unicorn-viz main-repo suite)
+        # Already covers this drop-in via the drop-ins/ path; kept identical to
+        # the scan the main repo runs.
         entry: bash -c 'cd "$(git rev-parse --show-toplevel)/../.." && .venv/bin/bandit -r unicornviz/ drop-ins/ -ll -q'
         language: system
         pass_filenames: false
