@@ -1,9 +1,9 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.15.2
+Version: 0.16.1
 Status: beta
-Last updated: 2026-06-29
+Last updated: 2026-08-04
 
 `media-01` is a local audio playback subsystem for unicorn-viz.  It scans a
 directory of audio files, reads ID3/Vorbis/FLAC tags via `mutagen`, and plays
@@ -85,6 +85,7 @@ Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
 
+- **0.16.1** — fonts now resolve through the shared `unicornviz.fonts` resolver (bundled ui-font.ttf first, then per-platform system dirs including Windows) — fixes tiny bitmap-font fallback on Windows.
 - **0.16.0** — **In-app tag editing.** Right-click a library track → **Edit tags…** to fix artist / title / album / genre / year without leaving the media deck. The write touches only the file's metadata — the audio is never re-encoded — and the library rescans so the row name updates. WAV/AIFF are skipped (no portable tag format). This is a deliberate copy of the dj-mixer-01 tag module; the two drop-ins run in isolation so each carries its own.
 
 - **0.15.2** — Bigger favorite hearts in the library rows (15px, wider click target)

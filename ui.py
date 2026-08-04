@@ -32,7 +32,7 @@ except Exception:  # pragma: no cover - headless import guard
     _SDL_OK = False
 
 try:
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw
     _PIL_OK = True
 except Exception:  # pragma: no cover
     _PIL_OK = False
@@ -64,24 +64,13 @@ _YELLOW  = (255, 210, 70, 255)
 _WARN    = (255, 120, 90, 255)
 _WAVE_HI = (0, 200, 255, 255)
 
-_FONT_CANDIDATES = (
-    '/usr/share/fonts/liberation-mono-fonts/LiberationMono-Bold.ttf',  # Fedora
-    '/usr/share/fonts/liberation-mono/LiberationMono-Bold.ttf',
-    '/usr/share/fonts/liberation/LiberationMono-Bold.ttf',             # Arch
-    '/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf',    # Debian
-    '/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf',
-)
-
-
 def _font(size: int):
     if _PIL_OK:
-        for path in _FONT_CANDIDATES:
-            try:
-                return ImageFont.truetype(path, size)
-            except Exception:
-                continue
+        # Shared resolver: bundled ui-font.ttf first, then per-platform
+        # system dirs (incl. Windows) — see unicornviz/fonts.py.
         try:
-            return ImageFont.load_default()
+            from unicornviz.fonts import load_font
+            return load_font(size)
         except Exception:
             return None
     return None
