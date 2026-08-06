@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.17.0'
+__version__ = '0.18.0'
 
 import logging
 import os
@@ -718,6 +718,45 @@ class MediaController:
             artist = str(t.get('artist', '') or '')
             out.append(f'{artist} - {title}' if artist else title)
         return out
+
+    def library_parts(self) -> list[tuple[str, str, float]]:
+        """``(artist, title, duration_s)`` per library row.
+
+        The browser draws artist and title as separate columns, so it needs
+        them apart rather than pre-joined -- a joined string cannot
+        column-align, and on a long list the eye scans one field at a time.
+        An untagged file reports an empty artist, which is the signal the UI
+        uses to give the filename the whole width.
+        """
+        out: list[tuple[str, str, float]] = []
+        for t in self._library:
+            title = str(t.get('title', '') or '') or Path(str(t.get('path', ''))).stem
+            artist = str(t.get('artist', '') or '')
+            try:
+                dur = float(t.get('duration_s', 0.0) or 0.0)
+            except (TypeError, ValueError):
+                dur = 0.0
+            out.append((artist, title, dur))
+        return out
+
+    def view_parts(self) -> list[tuple[int, str, str, float]]:
+        """:meth:`library_parts` for the active view, with library indices."""
+        parts = self.library_parts()
+        return [(i, *parts[i]) for i in self.view_indices()
+                if 0 <= i < len(parts)]
+
+    def view_stats(self) -> dict:
+        """Count, running time and how much of it is unknown, for the header.
+
+        A row count answers "how much have I got" only if you already know the
+        tracks.  Files whose length never got read contribute zero and are
+        counted separately, so the total reads as *at least* this long rather
+        than silently short.
+        """
+        rows = self.view_parts()
+        total = sum(d for _i, _a, _t, d in rows if d > 0.0)
+        unknown = sum(1 for _i, _a, _t, d in rows if d <= 0.0)
+        return {'count': len(rows), 'duration_s': total, 'unknown': unknown}
 
     # ------------------------------------------------------------------
     # Subsystem interface (called by app.py)

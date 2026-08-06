@@ -63,6 +63,57 @@ _HOT     = (60, 255, 160, 255)
 _YELLOW  = (255, 210, 70, 255)
 _WARN    = (255, 120, 90, 255)
 _WAVE_HI = (0, 200, 255, 255)
+# The row the room is hearing.  A bed, not a text colour: the name colour is
+# already carrying other meaning, and "what is playing" has to survive it.
+# Purple because nothing else on this surface uses it.
+_PLAYING_BED = (58, 26, 92, 255)
+_SEL_ON_PLAYING = (74, 44, 116, 255)     # selected *and* playing
+_ROW_HOVER_BED = (26, 34, 52, 255)       # hover with nothing else on the row
+_HOVER_LIFT = 26                         # how much a hovered row's bed lifts
+_ARTIST_MUTE = 0.85                      # the artist sits behind the title...
+_ARTIST_MIN_LUM = 484                    # ...but never duller than a mid grey
+
+
+def _muted(col) -> tuple[int, int, int, int]:
+    """A row colour toned back for the artist column.
+
+    Keeps the hue while sitting behind the title.  The lift back is
+    proportional, so it changes how bright the colour is without changing
+    which colour it is -- muting a saturated colour by a flat factor lands
+    *below* a mid grey, which made the "quieter" field the duller one.
+    """
+    base = [c * _ARTIST_MUTE for c in col[:3]]
+    lum = sum(base)
+    if 0.0 < lum < _ARTIST_MIN_LUM:
+        k = min(_ARTIST_MIN_LUM / lum, 1.0 / _ARTIST_MUTE)
+        base = [min(255.0, c * k) for c in base]
+    return tuple(int(c) for c in base) + (255,)
+
+
+def _hover_bed(bed):
+    """Lighten whatever bed a row already had, or give it one.
+
+    Additive rather than a replacement colour, so hovering never hides what
+    the row was already saying: a playing row stays purple, a selected row
+    stays blue, both just come up under the pointer.
+    """
+    if bed is None:
+        return _ROW_HOVER_BED
+    return tuple(min(255, c + _HOVER_LIFT) for c in bed[:3]) + (255,)
+
+
+def _mid_ellipsis(text: str, max_chars: int) -> str:
+    """Trim from the middle, so both ends of a name survive.
+
+    'Artist … (Extended Mix)' keeps the part that identifies the track *and*
+    the part that says which version it is -- cutting the tail loses the one
+    that usually matters when you have three edits of the same tune.
+    """
+    if max_chars <= 1 or len(text) <= max_chars:
+        return text
+    keep = max_chars - 1
+    head = (keep + 1) // 2
+    return text[:head] + '…' + text[len(text) - (keep - head):]
 
 def _font(size: int):
     if _PIL_OK:
@@ -106,6 +157,7 @@ class MediaDeckWindow:
         self._frame_lock = threading.Lock()
         self._regions: list = []          # (x0,y0,x1,y1, action, payload)
         self._rows: list = []             # (x0,y0,x1,y1, index)
+        self._mouse_xy = (-1, -1)         # cursor, for row hover
         self._mouse_scale_x = 1.0
         self._mouse_scale_y = 1.0
         self._sel = 0                     # library selection (view row)
@@ -258,6 +310,16 @@ class MediaDeckWindow:
             return
         if event.type == sdl2.SDL_MOUSEWHEEL:
             self._move_sel(-int(event.wheel.y) or 1)
+            return
+        if event.type == sdl2.SDL_MOUSEMOTION:
+            # Tracked purely for the hover highlight; the render thread reads
+            # it, which is safe because it is two ints written atomically.
+            self._mouse_xy = (int(event.motion.x * self._mouse_scale_x),
+                              int(event.motion.y * self._mouse_scale_y))
+            return
+        if event.type == sdl2.SDL_WINDOWEVENT and getattr(
+                event.window, 'event', None) == sdl2.SDL_WINDOWEVENT_LEAVE:
+            self._mouse_xy = (-1, -1)     # cursor gone: nothing is hovered
             return
         if (event.type == sdl2.SDL_MOUSEBUTTONDOWN
                 and event.button.button == sdl2.SDL_BUTTON_RIGHT):
@@ -834,6 +896,19 @@ class MediaDeckWindow:
                    fill=_TEXT if on else _DIM)
             regions.append((tabx, ty, tabx + tw2, ty + 18, 'set_mode', m))
             tabx += tw2 + 4
+        # How long this view is, not just how many rows -- a count answers
+        # "how much have I got" only if you already know the tracks.  Files
+        # whose length never got read count as zero and are flagged, so the
+        # total reads as *at least* this long rather than silently short.
+        stats_fn = getattr(self._c, 'view_stats', None)
+        st = stats_fn() if callable(stats_fn) else {}
+        has_stats = bool(st.get('count'))
+        if has_stats:
+            span = _fmt_time(st.get('duration_s', 0.0))
+            unknown = int(st.get('unknown', 0))
+            d.text((rx0 + 4, ty + 22),
+                   f'{st["count"]} tracks · {span}' + ('+' if unknown else ''),
+                   font=self._font_s, fill=_FAINT)
         # Sort flyout icon at the right edge of the tab row.
         if mode in ('library', 'favorites'):
             sox = rx1 - 26
@@ -842,7 +917,9 @@ class MediaDeckWindow:
             d.rectangle([sox, ty, sox + 22, ty + 18], outline=scol)
             d.text((sox + 4, ty + 4), '↑↓', font=self._font_s, fill=scol)
             regions.append((sox, ty, sox + 22, ty + 18, 'toggle_sort', None))
-        sy = ty + 24
+        # The search row sits below the stats line when there is one, so the
+        # two never share a strip -- inserted, not overlaid.
+        sy = ty + (38 if has_stats else 24)
         if mode == 'playlists':
             cur = getattr(self._c, 'active_playlist', None) or '(none)'
             lab = f'PL: {cur[:16]} ▼'
@@ -924,19 +1001,62 @@ class MediaDeckWindow:
                                   self._scroll))
         offset = self._scroll
         playing_name = (f'{artist} - {title}' if artist else title)
+        # ARTIST and TITLE get their own columns rather than one joined
+        # string: joined text cannot column-align, and on a long list the eye
+        # scans one field at a time.  Artist takes the smaller share -- it is
+        # the coarser sort key and repeats down the list, so it needs to be
+        # readable, not complete.  A length column sits on the right.
+        parts_fn = getattr(self._c, 'view_parts', None)
+        parts = {i: (a, t, dur) for i, a, t, dur
+                 in (parts_fn() if callable(parts_fn) else [])}
+        len_w = 34
+        name_px = max(60, (rx1 - rx0) - 40 - len_w)
+        artist_px = int(name_px * 0.34)
+        artist_chars = max(4, artist_px // 6)
+        title_chars = max(6, (name_px - artist_px) // 6)
+        hx, hy_m = self._mouse_xy
         for i in range(offset, min(len(view), offset + self._rows_visible)):
             idx, name = view[i]
             ry = list_top + (i - offset) * row_h
             is_sel = i == self._sel
             is_live = playing and name == playing_name
+            hovered = (rx0 <= hx <= rx1 and ry - 1 <= hy_m <= ry + row_h - 3)
+            # Bed order: playing, then selection, then hover on top -- each
+            # replaces the last as a *statement*, and hover only lifts what is
+            # already there so it never hides what the row was saying.
+            bed = _PLAYING_BED if is_live else None
             if is_sel:
-                d.rectangle([rx0, ry - 1, rx1, ry + row_h - 3],
-                            fill=(0, 45, 90, 255))
+                bed = _SEL_ON_PLAYING if is_live else (0, 45, 90, 255)
+            if hovered:
+                bed = _hover_bed(bed)
+            if bed is not None:
+                d.rectangle([rx0, ry - 1, rx1, ry + row_h - 3], fill=bed)
+            if is_live:
+                # The drip: the playing row breathes rather than sitting
+                # still.  A flat bed says "this one"; a moving one says "this
+                # one, right now" -- which is the whole difference between a
+                # marker and a readout, and it is the row you look for first
+                # every time you glance at the list.
+                self._drip_row(d, rx0, ry - 1, rx1, ry + row_h - 3)
+            if is_sel:
                 d.text((rx0 + 2, ry), '►', font=self._font_s, fill=_HOT)
             ncol = _WAVE_HI if is_live else (_TEXT if is_sel else _DIM)
-            maxr = max(8, (rx1 - rx0 - 40) // 6)
-            label = name if len(name) <= maxr else name[:maxr - 1] + '…'
-            d.text((rx0 + 14, ry), label, font=self._font_s, fill=ncol)
+            artist, title, dur = parts.get(idx, ('', name, 0.0))
+            tx = rx0 + 14
+            if artist:
+                d.text((tx, ry), _mid_ellipsis(artist, artist_chars),
+                       font=self._font_s, fill=_muted(ncol))
+                d.text((tx + artist_px, ry),
+                       _mid_ellipsis(title, title_chars),
+                       font=self._font_s, fill=ncol)
+            else:
+                # Untagged: the filename is the whole line, as it always was.
+                d.text((tx, ry),
+                       _mid_ellipsis(title or name, artist_chars + title_chars),
+                       font=self._font_s, fill=ncol)
+            if dur > 0.0:
+                d.text((rx1 - 26 - len_w, ry), f'{_fmt_time(dur):>6}',
+                       font=self._font_s, fill=_muted(ncol))
             fav = bool(getattr(self._c, 'is_favorite', lambda _i: False)(idx))
             d.text((rx1 - 21, ry - 2), '♥', font=self._font_heart,
                    fill=(255, 80, 160, 255) if fav else (46, 58, 84, 255))
@@ -1021,6 +1141,32 @@ class MediaDeckWindow:
             self._menu_rects = menu_rects
             self._tag_rects = tag_rects
         return img
+
+    # The playing row's pulse, in seconds per cycle.  Slow on purpose: this
+    # sits behind text you are reading, and anything quicker turns a list into
+    # a fairground.  Roughly one breath.
+    _DRIP_PERIOD_S = 2.6
+
+    def _drip_row(self, d, x0, y0, x1, y1) -> None:
+        """A breathing edge + inner glow on the row that is playing.
+
+        Drawn *over* the bed rather than replacing it, so the purple still
+        says "playing" on a frame where the pulse is at its dimmest -- the
+        animation is emphasis, never the only signal.  Everything here is
+        translucent over an already-opaque bed, which the raster proxy
+        composites correctly because the bed underneath is solid.
+        """
+        t = time.monotonic() / self._DRIP_PERIOD_S
+        pulse = 0.5 + 0.5 * abs((t * 2.0) % 2.0 - 1.0)      # 0..1 triangle
+        glow = tuple(int(c) for c in _WAVE_HI[:3])
+        # A left-edge bar is the anchor: it reads as "here" even at the bottom
+        # of the pulse, where a whole-row wash would fade to nothing.
+        d.rectangle([x0, y0, x0 + 2, y1], fill=glow + (150 + int(105 * pulse),))
+        d.rectangle([x0, y0, x1, y1], outline=glow + (40 + int(90 * pulse),))
+        # ...and a soft inner top-light, which is what makes it look lit from
+        # within rather than outlined.
+        d.rectangle([x0 + 3, y0 + 1, x1 - 1, y0 + max(2, (y1 - y0) // 3)],
+                    fill=glow + (14 + int(34 * pulse),))
 
     def _draw_platter(self, d, cx, cyc, r, playing, pos, dur) -> None:
         """The neon platter, media-deck flavour: cyan glow breathing with a
