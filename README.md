@@ -85,6 +85,7 @@ Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
 
+- **0.17.0** — **Accepts playlists handed over by other drop-ins.**  Registers as a *playlist sink* on the core hub, so the DJ mixer can right-click a set and send it here as a playlist **of the same name** — a set called "Friday Peak" arrives as "Friday Peak", not "Playlist 7".  Neither drop-in imports the other; the core hub is the seam, so either works installed alone.  Sending to a name that already exists **adds** rather than replacing, since the sender may be sending a second batch and discarding what was there is not recoverable, and the accepted count is what was actually taken (duplicates skipped) rather than an echo of what was asked for.
 - **0.16.1** — fonts now resolve through the shared `unicornviz.fonts` resolver (bundled ui-font.ttf first, then per-platform system dirs including Windows) — fixes tiny bitmap-font fallback on Windows.
 - **0.16.0** — **In-app tag editing.** Right-click a library track → **Edit tags…** to fix artist / title / album / genre / year without leaving the media deck. The write touches only the file's metadata — the audio is never re-encoded — and the library rescans so the row name updates. WAV/AIFF are skipped (no portable tag format). This is a deliberate copy of the dj-mixer-01 tag module; the two drop-ins run in isolation so each carries its own.
 

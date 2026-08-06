@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.16.1'
+__version__ = '0.17.0'
 
 import logging
 import os
@@ -522,6 +522,11 @@ class MediaController:
                 vj.register_now_playing('media', self.snapshot, priority=20)
             except Exception as exc:
                 log.debug('media-01: now-playing registration failed: %s', exc)
+        # Offer ourselves as a playlist destination, so another drop-in (the
+        # DJ mixer) can hand us a set without either of us importing the
+        # other.  Registered late in __init__ so _playlists exists by the time
+        # anything can call in.
+        self._vj_for_sink = vj
 
         self._window = None       # Media Deck window (Shift+L)
         # Playlists + library view state (accordion crates / sort / excludes).
@@ -541,6 +546,15 @@ class MediaController:
             self._playlists = _mod.MediaPlaylists(store_path)
         except Exception as exc:
             log.warning('media-01: playlists store unavailable: %s', exc)
+        # Now that the store exists, offer ourselves as a destination other
+        # drop-ins can hand a playlist to (the DJ mixer's "send set to media
+        # player").  Neither side imports the other; the core hub is the seam.
+        sink = getattr(self._vj_for_sink, 'register_playlist_sink', None)
+        if callable(sink) and self._playlists is not None:
+            try:
+                sink('media player', self.accept_playlist)
+            except Exception as exc:
+                log.debug('media-01: playlist sink registration failed: %s', exc)
         self.mode = 'library'              # 'library' | 'playlists'
         rep = str(self._cfg.get('repeat', 'all') or 'all').lower()
         self.repeat = rep if rep in ('all', 'one', 'off') else 'all'
@@ -1099,6 +1113,34 @@ class MediaController:
         if self._backend is not None:
             self._backend.shutdown()
             self._backend = None
+
+    def accept_playlist(self, name: str, paths: list) -> int:
+        """Take a playlist handed over by another drop-in.
+
+        Keeps the sender's name, which is the point of the feature: a set
+        called "Friday Peak" in the mixer should be "Friday Peak" here, not
+        "Playlist 7".  An existing list of that name is **added to** rather
+        than replaced -- the sender may be sending a second batch, and
+        silently discarding what was already there is not recoverable.
+
+        Returns how many tracks were actually taken (duplicates already in the
+        list are skipped by the store), so the sender can report honestly
+        rather than echoing back what it asked for.
+        """
+        store = self._playlists
+        if store is None:
+            raise RuntimeError('media-01 has no playlist store')
+        rows = [str(p) for p in (paths or []) if p]
+        if not rows:
+            return 0
+        title = str(name or '').strip() or 'Imported'
+        if title not in store.names():
+            store.create(title)
+        took = int(store.add(title, rows))
+        store.save()
+        log.info('media-01: accepted %d/%d track(s) into playlist %r',
+                 took, len(rows), title)
+        return took
 
     def snapshot(self) -> dict[str, Any]:
         """Return current state in the same shape as SpotifyController.snapshot().
