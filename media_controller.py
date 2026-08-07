@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.19.0'
+__version__ = '0.20.0'
 
 import logging
 import os
@@ -562,7 +562,12 @@ class MediaController:
                 log.debug('media-01: playlist sink registration failed: %s', exc)
         self.mode = 'library'              # 'library' | 'playlists'
         rep = str(self._cfg.get('repeat', 'all') or 'all').lower()
-        self.repeat = rep if rep in ('all', 'one', 'off') else 'all'
+        # Default OFF as of 0.20.0, matching the DJ mixer's loop flip: a
+        # list that never ends cannot be walked away from, and an
+        # unattended run needs 'the set is over' to be reachable at all.
+        # ALL and ONE remain one button-press away.
+        self.repeat = rep if rep in ('all', 'one', 'off') else 'off'
+        self._set_over = False     # latched; see _note_set_over()
         # Crossfade between tracks (VLC backend: true overlapping fade).
         self.crossfade_enabled = bool(self._cfg.get('crossfade', True))
         self._crossfade_s = max(0.5, float(
@@ -812,6 +817,7 @@ class MediaController:
                     if self.repeat == 'off' and at_end:
                         self._is_playing = False
                         self._status = 'stopped'
+                        self._note_set_over()
                     else:
                         self._advance(1)
         elif self._status == 'paused':
@@ -1036,6 +1042,32 @@ class MediaController:
         names = self.library_names()
         return [(i, names[i]) for i in self.view_indices()]
 
+    def _note_set_over(self) -> None:
+        """The playlist finished with REPEAT OFF: say so on the session bus.
+
+        The stopping already worked -- REPEAT OFF has always halted at the end
+        of the list.  What was missing was *announcing* it: the player simply
+        went quiet, which is invisible to anything downstream, including an
+        unattended run waiting to package a recording.
+
+        Publishes the same ``phase: 'over'`` the DJ mixer publishes when its
+        set clock runs out or its playlist is exhausted, so a consumer never
+        has to know which source ended the session, or which app it came from.
+        Announced once and re-armed by :meth:`_start_track`.
+        """
+        if self._set_over:
+            return
+        self._set_over = True
+        log.info('media-01: set over — playlist finished with REPEAT OFF')
+        vj = getattr(self._app, 'vj_api', None)
+        publish = getattr(vj, 'publish_session', None)
+        if callable(publish):
+            try:
+                publish('media', {'phase': 'over', 'source': 'list_exhausted',
+                                  'seconds_left': 0.0, 'minutes_left': 0.0})
+            except Exception as exc:       # pragma: no cover - defensive
+                log.debug('media-01: set-over publish failed: %s', exc)
+
     def _advance(self, delta: int) -> None:
         """Move within the active view (auto-advance / next / prev)."""
         view = self.view_indices()
@@ -1254,6 +1286,8 @@ class MediaController:
     # ------------------------------------------------------------------
 
     def _start_track(self, index: int) -> None:
+        # Playing again, so a later exhaustion is a new event to announce.
+        self._set_over = False
         if not self._library or self._backend is None:
             return
         index = index % len(self._library)

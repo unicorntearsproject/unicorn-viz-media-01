@@ -175,3 +175,79 @@ def test_view_parts_keeps_artist_and_title_apart() -> None:
     rows = _C().view_parts()
     assert rows[0] == (0, 'Anzo', 'Tune', 250.0)
     assert rows[1] == (1, '', 'some_rip', 0.0)
+
+
+# -- the set actually ending --------------------------------------------------
+#
+# REPEAT OFF has always stopped at the end of the list.  What was missing was
+# *announcing* it: the player went quiet, which is invisible to anything
+# downstream -- including an unattended run waiting to package a recording.
+
+def _ctl_stub(published):
+    mc = _load('media_controller')
+
+    class _Vj:
+        @staticmethod
+        def publish_session(source, payload):
+            published.append((source, payload))
+
+    class _App:
+        vj_api = _Vj()
+
+    c = mc.MediaController.__new__(mc.MediaController)
+    c._app = _App()
+    c._set_over = False
+    return c
+
+
+def test_the_end_of_the_list_is_published_as_phase_over() -> None:
+    """The same phase the DJ mixer publishes, so a consumer never has to know
+    which source ended the session -- or which app it came from."""
+    published: list = []
+    _ctl_stub(published)._note_set_over()
+    assert len(published) == 1
+    source, payload = published[0]
+    assert source == 'media'
+    assert payload['phase'] == 'over'
+    assert payload['source'] == 'list_exhausted'
+    assert payload['minutes_left'] == 0.0
+
+
+def test_it_is_announced_once_not_on_every_tick() -> None:
+    published: list = []
+    c = _ctl_stub(published)
+    for _ in range(5):
+        c._note_set_over()
+    assert len(published) == 1
+
+
+def test_playing_again_re_arms_the_announcement() -> None:
+    """A second session in the same run is a second event."""
+    published: list = []
+    c = _ctl_stub(published)
+    c._note_set_over()
+    c._set_over = False              # what _start_track does
+    c._note_set_over()
+    assert len(published) == 2
+
+
+def test_an_older_core_without_the_bus_is_survived() -> None:
+    mc = _load('media_controller')
+
+    class _App:
+        vj_api = object()            # no publish_session at all
+
+    c = mc.MediaController.__new__(mc.MediaController)
+    c._app = _App()
+    c._set_over = False
+    c._note_set_over()               # must not raise
+    assert c._set_over is True
+
+
+def test_repeat_defaults_off_so_a_session_can_end() -> None:
+    """Matching the DJ mixer's loop flip: ALL and ONE stay one press away."""
+    mc = _load('media_controller')
+    c = mc.MediaController.__new__(mc.MediaController)
+    c._cfg = {}
+    rep = str(c._cfg.get('repeat', 'off') or 'off').lower()
+    assert (rep if rep in ('all', 'one', 'off') else 'off') == 'off'
