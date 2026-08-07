@@ -1,9 +1,9 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.16.1
+Version: 0.19.0
 Status: beta
-Last updated: 2026-08-04
+Last updated: 2026-08-07
 
 `media-01` is a local audio playback subsystem for unicorn-viz.  It scans a
 directory of audio files, reads ID3/Vorbis/FLAC tags via `mutagen`, and plays
@@ -85,6 +85,7 @@ Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
 
+- **0.19.0** — New `[media] auto_play` config key: start playback of the first (post-shuffle) library track automatically at boot, no `Ctrl+Alt+M`/MIDI action needed. Built for unattended/headless use — `unicornviz --media-source` (training-daemon `--source media`) sets this via a CLI override. Consumed by a new `App._maybe_auto_play_media()` boot trigger in core, mirroring the RTMP streamer's existing `auto_start` pattern. See `docs/adr/vj-system.md` (main repo) and `drop-ins/training-kit-01/docs/headless-training.md`.
 - **0.18.0** — **The library browser catches up with the mixer's.**  **ARTIST and TITLE get their own columns** instead of one joined string — joined text cannot column-align, and on a long list the eye scans one field at a time; an untagged file still shows its filename across the full width.  A **length column**, and the header says how long the whole view is (`5 tracks · 19:11`) rather than only how many rows, with a `+` when some lengths were never read so the figure reads as *at least* that.  Names trim from the **middle**, so `Artist … (Extended Mix)` keeps both the part that identifies the track and the part that says which version.  **Rows highlight on hover**, additively — hovering a playing row lifts it rather than hiding what it was saying.  And **the playing row drips**: a breathing cyan edge and inner glow over the purple bed, because a flat marker says *this one* and a moving one says *this one, right now*.  Slow on purpose — it sits behind text you are reading — and never invisible at its dimmest, since the animation is emphasis and not the only signal.
 - **0.17.0** — **Accepts playlists handed over by other drop-ins.**  Registers as a *playlist sink* on the core hub, so the DJ mixer can right-click a set and send it here as a playlist **of the same name** — a set called "Friday Peak" arrives as "Friday Peak", not "Playlist 7".  Neither drop-in imports the other; the core hub is the seam, so either works installed alone.  Sending to a name that already exists **adds** rather than replacing, since the sender may be sending a second batch and discarding what was there is not recoverable, and the accepted count is what was actually taken (duplicates skipped) rather than an echo of what was asked for.
 - **0.16.1** — fonts now resolve through the shared `unicornviz.fonts` resolver (bundled ui-font.ttf first, then per-platform system dirs including Windows) — fixes tiny bitmap-font fallback on Windows.

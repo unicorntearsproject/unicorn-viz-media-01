@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.18.0'
+__version__ = '0.19.0'
 
 import logging
 import os
@@ -443,6 +443,11 @@ class MediaController:
         self._media_dir = self._resolve_media_dir(self._cfg)
 
         self._shuffle: bool = bool(self._cfg.get('shuffle', True))
+        # 2026-08-07: boot-time auto-play for unattended/headless use (e.g.
+        # training-daemon --media-source) -- see App._maybe_auto_play_media().
+        # Set before the `enabled` early-return below so the attribute
+        # always exists, matching self.enabled's always-set pattern.
+        self.auto_play: bool = bool(self._cfg.get('auto_play', False))
         self._volume: int = max(0, min(200, int(self._cfg.get('volume', 100) or 100)))
         self._now_playing_banner_enabled: bool = bool(
             self._cfg.get('now_playing_banner', True)
