@@ -17,6 +17,7 @@ flagged at startup.
 | `media_dir` | str | `""` | Library root, recursively scanned. Empty = the bundled `drop-ins/media-01/media/` directory |
 | `shuffle` | bool | `true` | Randomize play order once at load; toggle live with `Ctrl+Alt+Shift+M` |
 | `auto_play` | bool | `false` | Start playback of the first (post-shuffle) library track automatically at boot — no `Ctrl+Alt+M` / MIDI action needed. For unattended/headless use, e.g. `unicornviz --media-source` (training-daemon `--source media`). |
+| `boot_playlist` | str | `""` | Force a named playlist (from the playlists store, not the separate hearted-tracks favorites set) active at boot, index landing on the playlist's own first entry. Empty = disabled (normal library/restored-prefs behavior). Falls back to the library view (logged) if the name doesn't exist or is empty. `unicornviz --media-source --media-favorites` sets this to `'favorites'` plus forces `shuffle=false`/`repeat='off'` as CLI overrides (not written to `config.toml`). |
 | `volume` | int | `100` | `0`-`200` (`100` = unity gain); only takes effect live on the VLC backend |
 | `now_playing_banner` | bool | `true` | Show the track-change overlay banner (same as Spotify's) |
 | `now_playing_banner_hold_s` | float | `10.0` | Seconds the banner stays visible, floor `1.0` |

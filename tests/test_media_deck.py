@@ -318,7 +318,7 @@ def test_f_key_toggles_window_fullscreen_not_forwarded(monkeypatch) -> None:
     win.close_now()
 
 
-def _real_controller(tmp_path, tracks):
+def _real_controller(tmp_path, tracks, extra_cfg=None):
     """MediaController with a scanned fake library + fake backend."""
     class _App:
         vj_api = None
@@ -329,9 +329,12 @@ def _real_controller(tmp_path, tracks):
         p = tmp_path / rel
         p.parent.mkdir(parents=True, exist_ok=True)
         sf.write(str(p), np.zeros((1000, 2), dtype='float32'), 48_000)
-    ctl = _mc.MediaController(_App(), {
+    cfg = {
         'enabled': True, 'media_dir': str(tmp_path), 'shuffle': False,
-        'playlists_path': str(tmp_path / 'pl.json')})
+        'playlists_path': str(tmp_path / 'pl.json')}
+    if extra_cfg:
+        cfg.update(extra_cfg)
+    ctl = _mc.MediaController(_App(), cfg)
 
     class _Backend:
         can_seek = can_volume = False
@@ -585,6 +588,55 @@ def test_favorites_toggle_view_and_persistence(tmp_path) -> None:
     reloaded = _pl.MediaPlaylists(tmp_path / 'pl.json')
     assert reloaded.favorites == {ctl.snapshot_path_at(ib)}
     assert reloaded.prefs.get('mode') == 'favorites'
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-14: boot_playlist -- headless training-run playlist selection.
+# ---------------------------------------------------------------------------
+
+
+def test_boot_playlist_selects_named_playlist_and_starts_on_its_first_track(tmp_path) -> None:
+    ctl = _real_controller(tmp_path, ['crates/a.wav', 'crates/b.wav', 'loops/l.wav'])
+    names = ctl.library_names()
+    a_path = ctl.snapshot_path_at(
+        next(i for i, n in enumerate(names) if 'a' in n and 'crates' in str(ctl.snapshot_path_at(i))))
+    l_path = ctl.snapshot_path_at(
+        next(i for i, n in enumerate(names) if 'loops' in str(ctl.snapshot_path_at(i))))
+    store = _pl.MediaPlaylists(tmp_path / 'pl.json')
+    store.create('favorites')
+    store.add('favorites', [l_path, a_path])   # deliberately not library order
+
+    # _real_controller() re-scans the same tmp_path -- no new tracks passed
+    # here, the ones from the first call are still on disk.
+    booted = _real_controller(tmp_path, [], extra_cfg={'boot_playlist': 'favorites'})
+
+    assert booted.mode == 'playlists'
+    assert booted.active_playlist == 'favorites'
+    view_paths = [str(booted.snapshot_path_at(i)) for i in booted.view_indices()]
+    assert view_paths == [l_path, a_path]   # playlist order, not library order
+    assert str(booted.snapshot_path_at(booted._index)) == l_path   # boots on the first playlist entry
+
+
+def test_boot_playlist_falls_back_to_library_when_name_not_found(tmp_path) -> None:
+    ctl = _real_controller(tmp_path, ['a.wav'], extra_cfg={'boot_playlist': 'does-not-exist'})
+
+    assert ctl.mode == 'library'
+
+
+def test_boot_playlist_falls_back_to_library_when_playlist_is_empty(tmp_path) -> None:
+    _real_controller(tmp_path, ['a.wav'])   # scans the library, populates pl.json
+    store = _pl.MediaPlaylists(tmp_path / 'pl.json')
+    store.create('empty-list')
+
+    booted = _real_controller(tmp_path, [], extra_cfg={'boot_playlist': 'empty-list'})
+
+    assert booted.mode == 'library'
+
+
+def test_boot_playlist_disabled_by_default(tmp_path) -> None:
+    ctl = _real_controller(tmp_path, ['a.wav'])
+
+    assert ctl.mode == 'library'
 
 
 def test_tag_editor_writes_and_leaves_the_audio_untouched(tmp_path) -> None:

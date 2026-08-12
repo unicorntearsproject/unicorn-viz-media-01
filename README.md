@@ -1,9 +1,9 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.19.0
+Version: 0.21.0
 Status: beta
-Last updated: 2026-08-07
+Last updated: 2026-08-14
 
 `media-01` is a local audio playback subsystem for unicorn-viz.  It scans a
 directory of audio files, reads ID3/Vorbis/FLAC tags via `mutagen`, and plays
@@ -85,6 +85,17 @@ Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
 
+- **0.21.0** — New `[media] boot_playlist` config key: force a specific
+  named playlist (from the playlists store, not the separate hearted-
+  tracks favorites set) at boot, unshuffled index landing on the
+  playlist's own first entry. Built for unattended/headless use —
+  `unicornviz --media-source --media-favorites` (training-daemon
+  `--source media`) sets `boot_playlist='favorites'` plus `shuffle=false`/
+  `repeat='off'` via CLI override. Gated by its own config key so normal
+  interactive starts are unaffected; runs after `_restore_prefs()` so an
+  explicit boot request always wins over a previous interactive
+  session's saved mode. Falls back to the library view (logged) if the
+  named playlist doesn't exist or is empty.
 - **0.20.0** — **A session can now end, and says so.**  `repeat` defaults to **OFF** (was ALL), matching the DJ mixer's loop flip — a list that never ends cannot be walked away from, and an unattended run needs "the set is over" to be reachable at all; ALL and ONE stay one button-press away.  REPEAT OFF already *stopped* at the end of the list; what was missing was **announcing** it.  It now publishes `phase: 'over'` on the session bus — the same phase the DJ mixer publishes when its set clock runs out or its playlist is exhausted — so a consumer never has to know which source ended the session, or which app it came from.  Announced once, re-armed when something plays again, and survives an older core without the bus.
 - **0.19.0** — New `[media] auto_play` config key: start playback of the first (post-shuffle) library track automatically at boot, no `Ctrl+Alt+M`/MIDI action needed. Built for unattended/headless use — `unicornviz --media-source` (training-daemon `--source media`) sets this via a CLI override. Consumed by a new `App._maybe_auto_play_media()` boot trigger in core, mirroring the RTMP streamer's existing `auto_start` pattern. See `docs/adr/vj-system.md` (main repo) and `drop-ins/training-kit-01/docs/headless-training.md`.
 - **0.18.0** — **The library browser catches up with the mixer's.**  **ARTIST and TITLE get their own columns** instead of one joined string — joined text cannot column-align, and on a long list the eye scans one field at a time; an untagged file still shows its filename across the full width.  A **length column**, and the header says how long the whole view is (`5 tracks · 19:11`) rather than only how many rows, with a `+` when some lengths were never read so the figure reads as *at least* that.  Names trim from the **middle**, so `Artist … (Extended Mix)` keeps both the part that identifies the track and the part that says which version.  **Rows highlight on hover**, additively — hovering a playing row lifts it rather than hiding what it was saying.  And **the playing row drips**: a breathing cyan edge and inner glow over the purple bed, because a flat marker says *this one* and a moving one says *this one, right now*.  Slow on purpose — it sits behind text you are reading — and never invisible at its dimmest, since the animation is emphasis and not the only signal.

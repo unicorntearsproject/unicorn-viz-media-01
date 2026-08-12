@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.20.0'
+__version__ = '0.21.0'
 
 import logging
 import os
@@ -448,6 +448,13 @@ class MediaController:
         # Set before the `enabled` early-return below so the attribute
         # always exists, matching self.enabled's always-set pattern.
         self.auto_play: bool = bool(self._cfg.get('auto_play', False))
+        # 2026-08-14: boot-time named-playlist selection for unattended/
+        # headless training runs (training-daemon --source media
+        # --media-favorites, which passes boot_playlist='favorites' --
+        # matching the actual named playlist in the playlists store, NOT
+        # the separate hearted-tracks favorites set) -- see
+        # _maybe_boot_playlist(), called at the end of __init__.
+        self._boot_playlist: str = str(self._cfg.get('boot_playlist', '') or '').strip()
         self._volume: int = max(0, min(200, int(self._cfg.get('volume', 100) or 100)))
         self._now_playing_banner_enabled: bool = bool(
             self._cfg.get('now_playing_banner', True)
@@ -586,6 +593,44 @@ class MediaController:
         # toggles this; config sets the startup default.
         self.keep_playing_on_close = bool(
             self._cfg.get('keep_playing_on_close', True))
+        self._maybe_boot_playlist()
+
+    def _maybe_boot_playlist(self) -> None:
+        """Force a specific named playlist for an unattended training run.
+
+        Gated by ``boot_playlist`` (a playlist name, empty = disabled) so
+        normal interactive starts are unaffected. Runs last in __init__,
+        after _restore_prefs(), so an explicit boot request always wins
+        over whatever a previous interactive session left saved in prefs
+        -- the point of an unattended run is deterministic, requested
+        behavior, not resuming a human's last state (contrast dj-mixer-01's
+        autoplay boot, which deliberately does *not* override a restored
+        mode -- that one protects a real DJ's last live toggle; there is
+        no such state to protect here). Falls back to the library view
+        (logged) if the named playlist doesn't exist or is empty, rather
+        than booting into an empty view that would silently never start
+        playback.
+        """
+        if not self._boot_playlist or self._playlists is None:
+            return
+        if self._boot_playlist not in self._playlists.names():
+            log.warning(
+                'media-01: boot_playlist %r not found (have: %s); '
+                'falling back to the library view',
+                self._boot_playlist, self._playlists.names(),
+            )
+            return
+        self.mode = 'playlists'
+        self.active_playlist = self._boot_playlist
+        view = self.view_indices()
+        if not view:
+            log.warning(
+                'media-01: boot_playlist %r is empty; falling back to '
+                'the library view', self._boot_playlist,
+            )
+            self.mode = 'library'
+            return
+        self._index = view[0]
 
     # ------------------------------------------------------------------
     # Public control surface
