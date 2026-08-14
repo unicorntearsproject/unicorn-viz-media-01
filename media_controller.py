@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.22.0'
+__version__ = '0.23.0'
 
 import logging
 import os
@@ -1340,7 +1340,23 @@ class MediaController:
             'playback': None,
             'queue': [],
             'queue_len': max(0, len(self._library) - self._index - 1),
-            'playlist_context': None,
+            # 2026-08-14, round three: was hardcoded None -- self.active_playlist
+            # is real, already-tracked state (see _restore_prefs()/boot_playlist),
+            # just never surfaced here. Same shape spotify-01 populates
+            # (auto_vj.py reads .get('name') for playlist-name inference in
+            # training-kit-01's packaging step -- previously Spotify-only,
+            # forcing a manual prompt for every mixer/media session). None
+            # when playing the full shuffled library (no named playlist is
+            # actually active), matching Spotify's own "not in a playlist"
+            # behavior. Owner: "our training packager is supposed to be
+            # self-naming it's playlist when the data is available (and it
+            # should be from the mixer & mediaplayer) but i'm having to type
+            # it in every time." See docs/adr/vj-system.md.
+            'playlist_context': (
+                {'id': self.active_playlist, 'name': self.active_playlist,
+                 'uri': '', 'total_tracks': 0, 'owner': ''}
+                if self.active_playlist else None
+            ),
             'poll_inflight': False,
             'source': 'media-01',
             # Extra: library size for HUD display

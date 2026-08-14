@@ -1,7 +1,7 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.22.0
+Version: 0.23.0
 Status: beta
 Last updated: 2026-08-14
 
@@ -85,6 +85,14 @@ Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
 
+- **0.23.0** — `snapshot()`'s `playlist_context` was hardcoded `None` —
+  now reflects `self.active_playlist` (real, already-tracked state) in
+  the same shape spotify-01 populates, so training-kit-01's playlist-
+  name inference (previously Spotify-only) picks it up for free. Owner:
+  "our training packager is supposed to be self-naming it's playlist
+  when the data is available (and it should be from the mixer &
+  mediaplayer) but i'm having to type it in every time." See
+  `docs/adr/vj-system.md` (main repo).
 - **0.22.0** — Publishes the currently playing track's local file path
   on the shared `vj_api` track-path bus (`publish_track_path()`, new
   `_publish_track_path()` called from `update()`). Owner: "essentia
