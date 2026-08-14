@@ -1,7 +1,7 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.21.0
+Version: 0.22.0
 Status: beta
 Last updated: 2026-08-14
 
@@ -85,6 +85,15 @@ Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
 
+- **0.22.0** — Publishes the currently playing track's local file path
+  on the shared `vj_api` track-path bus (`publish_track_path()`, new
+  `_publish_track_path()` called from `update()`). Owner: "essentia
+  should work on media player data as well, those are using the same
+  local files as the mixer." Same bus dj-mixer-01's `_exchange_bpm()`
+  already uses; lets training-kit-01's packaging step run real
+  independent analysis (Essentia) against the actual file regardless of
+  which drop-in was the audio source. See `docs/adr/vj-system.md`
+  (main repo).
 - **0.21.0** — New `[media] boot_playlist` config key: force a specific
   named playlist (from the playlists store, not the separate hearted-
   tracks favorites set) at boot, unshuffled index landing on the

@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.21.0'
+__version__ = '0.22.0'
 
 import logging
 import os
@@ -878,6 +878,34 @@ class MediaController:
         win = self._window
         if win is not None and not win.is_open:
             self.close_window()          # window self-closed (Esc Esc)
+
+        self._publish_track_path()
+
+    def _publish_track_path(self) -> None:
+        """Publish the currently playing track's local file path.
+
+        2026-08-14, round three: media-01 plays from the same kind of
+        local files dj-mixer-01 does -- owner: "essentia should work on
+        media player data as well, those are using the same local files
+        as the mixer." Same vj_api.publish_track_path() bus dj-mixer-01's
+        _exchange_bpm() uses, so training-kit-01's offline packaging step
+        can run independent analysis (Essentia) against the actual file
+        regardless of which drop-in was the audio source. No-op when not
+        actually playing, or without a real path (e.g. index out of
+        range). See docs/adr/vj-system.md.
+        """
+        if not self._is_playing:
+            return
+        path = self.snapshot_path_at(self._index)
+        if not path:
+            return
+        vj = getattr(self._app, 'vj_api', None)
+        publish = getattr(vj, 'publish_track_path', None)
+        if callable(publish):
+            try:
+                publish('media', path)
+            except Exception as exc:       # pragma: no cover - defensive
+                log.debug('media-01: track-path publish failed: %s', exc)
 
     def handle_key(self, sym: int, mod: int) -> str | None | bool:
         """Handle media hotkeys.
