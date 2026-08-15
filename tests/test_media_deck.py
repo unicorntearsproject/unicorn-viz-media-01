@@ -195,8 +195,11 @@ def test_controller_surface_play_index_and_names(tmp_path) -> None:
     class _App:
         vj_api = None
 
+    # playlists_path under tmp: play_index records recently-played through the
+    # store, and the default path is the repo's own runtime file.
     ctl = _mc.MediaController(_App(), {'enabled': True,
-                                       'media_dir': str(tmp_path)})
+                                       'media_dir': str(tmp_path),
+                                       'playlists_path': str(tmp_path / 'p.json')})
 
     class _Backend:
         can_seek = True

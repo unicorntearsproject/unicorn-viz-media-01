@@ -1,9 +1,9 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.23.0
+Version: 0.24.0
 Status: beta
-Last updated: 2026-08-14
+Last updated: 2026-08-15
 
 `media-01` is a local audio playback subsystem for unicorn-viz.  It scans a
 directory of audio files, reads ID3/Vorbis/FLAC tags via `mutagen`, and plays
@@ -15,6 +15,12 @@ in the exact same format as the Spotify drop-in — no visual changes.
 ## Features
 
 - **Full tag support** — ID3v2, Vorbis comments, FLAC, AAC/MP4, WMA via mutagen
+  (title / artist / album / genre / year)
+- **Media Deck window** (`Shift+L`) — the mixer board's single-deck sibling:
+  audio-reactive neon platter with a live spectrum ring, library browser with
+  crates, faceted filters (artist / album / genre / decade), search,
+  playlists / favorites / recent views, hover tooltips on everything, and
+  in-place playlist management (rename / duplicate / prune / delete)
 - **Supported formats** — mp3, flac, ogg, opus, wav, aiff, m4a, aac, wma, ape, wv
 - **Cross-platform playback** — python-vlc (libvlc) on Linux, Windows, macOS
 - **Fallback chain** — mpv → ffplay when VLC is unavailable
@@ -85,6 +91,33 @@ Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
 
+- **0.24.0** — **The Media Player 2.0 treatment: the library grows up, and
+  the deck starts hearing the room.**  Everything here is the mixer browser's
+  UX ported across, minus the DJ-only parts (no BPM, no keys, no stems).
+  **Faceted filters** (`≡` next to sort): artist / album / genre / **decade**
+  — a listener thinks "90s" the way a DJ thinks in BPM ranges — AND across
+  facets, OR within one, applied in *every* view so FILTER means one thing
+  wherever you stand; the header names the narrowing (`30 tracks · 2:03 · 1
+  filter`) so a filtered library never reads as a shrunken one.  A **RECENT
+  tab**: the last 50 tracks that actually played, newest first, persisted.
+  **Sort by album / year / length** joins artist / title — view-only, a
+  playlist's stored order is never rewritten.  **Playlist management** grown
+  in place: the picker rows now say `name (7 · 33m)` with a dead-path badge,
+  and right-clicking one offers rename (position preserved, collisions
+  refused), duplicate (`name (2)`), prune-missing, and an armed SURE? delete.
+  Playlist row edits (remove / move) now resolve **by path**, not view row,
+  so a sorted or filtered view can no longer edit the wrong track.  **Hover
+  tooltips everywhere** via the core tooltip system — a row shows its whole
+  tag card.  And the **drip**: the platter's glow breathes with live bass, a
+  rim ring flashes on the beat, treble opens the sparkle gate, and a 32-bar
+  **radial spectrum ring** orbits the record counter-to-the-spin, all fed by
+  the app's own analyzer (captured only while the deck is open; a core
+  without audio levels degrades to the old time-driven look).  Also: honest
+  empty states ("nothing matches — clear the filters" vs "nothing played
+  yet"), heart-glyph hover previews, and flyout clicks now land on the
+  flyout instead of the search box underneath it (hit-test walks regions
+  top-most first — the first playlist row in the picker was previously
+  unclickable).
 - **0.23.0** — `snapshot()`'s `playlist_context` was hardcoded `None` —
   now reflects `self.active_playlist` (real, already-tracked state) in
   the same shape spotify-01 populates, so training-kit-01's playlist-

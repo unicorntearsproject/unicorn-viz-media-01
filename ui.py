@@ -37,6 +37,18 @@ try:
 except Exception:  # pragma: no cover
     _PIL_OK = False
 
+# Shared hover-tooltip system (core owns timing + bubble geometry; region
+# content stays here) — same machinery the mixer and control room ride.
+try:
+    from unicornviz.tooltips import (
+        TooltipHoverTracker,
+        TooltipRegion,
+        draw_tooltip_pil,
+    )
+    _TIPS_OK = True
+except Exception:  # pragma: no cover - older core without tooltips
+    _TIPS_OK = False
+
 # Palette — the dj-mixer-01 board language (kept in sync by eye, not import:
 # drop-ins stay independent).
 _BG      = (8, 10, 18, 255)
@@ -67,6 +79,8 @@ _WAVE_HI = (0, 200, 255, 255)
 # already carrying other meaning, and "what is playing" has to survive it.
 # Purple because nothing else on this surface uses it.
 _PLAYING_BED = (58, 26, 92, 255)
+_GOLD    = (255, 200, 60, 255)           # the mixer's gold: names of lists,
+                                         # "this is the one running" accents
 _SEL_ON_PLAYING = (74, 44, 116, 255)     # selected *and* playing
 _ROW_HOVER_BED = (26, 34, 52, 255)       # hover with nothing else on the row
 _HOVER_LIFT = 26                         # how much a hovered row's bed lifts
@@ -134,6 +148,18 @@ def _fmt_time(seconds: float) -> str:
     return f'{h:d}:{m:02d}:{s:02d}' if h else f'{m:d}:{s:02d}'
 
 
+def _hms(seconds: float) -> str:
+    """A running time as ``1h23m`` / ``23m`` / ``0m``.
+
+    Coarse on purpose: list lengths are planning numbers, and seconds on a
+    two-hour total is noise that makes the row harder to read, not more
+    accurate.  (The mixer's set picker uses the same shape.)
+    """
+    total = max(0, int(seconds or 0))
+    h, m = divmod(total // 60, 60)
+    return f'{h}h{m:02d}m' if h else f'{m}m'
+
+
 class MediaDeckWindow:
     """Own-window renderer/controller UI for the local media player."""
 
@@ -172,6 +198,13 @@ class MediaDeckWindow:
         self._tag_rects: list = []
         self._pl_open = False               # playlist picker flyout
         self._sort_open = False             # sort flyout
+        self._filter_open = False           # faceted filter flyout
+        self._filter_expanded: str | None = None   # which facet is unfolded
+        self._pl_rects: list = []           # playlist flyout rows (right-click)
+        self._prompt: dict | None = None    # one-line text prompt modal
+        self._prompt_rects: list = []
+        # Shared hover tooltips (core system; None on an older core).
+        self._tips_tracker = (TooltipHoverTracker() if _TIPS_OK else None)
         self._frame_id = 0
         self._presented_id = -1
         self._raw: bytes | None = None
@@ -331,6 +364,9 @@ class MediaDeckWindow:
                 and event.button.button == sdl2.SDL_BUTTON_LEFT):
             bx = int(event.button.x * self._mouse_scale_x)
             by = int(event.button.y * self._mouse_scale_y)
+            if self._prompt is not None:
+                self._click_prompt(bx, by)
+                return
             if self._tag_edit is not None:
                 self._click_tag_editor(bx, by)
                 return
@@ -341,6 +377,9 @@ class MediaDeckWindow:
             return
 
     def _on_key(self, sym: int, mod: int, repeat: bool) -> None:  # noqa: ARG002
+        if self._prompt is not None:
+            self._prompt_key(sym, mod)
+            return
         if self._tag_edit is not None:
             self._tag_edit_key(sym, mod)
             return
@@ -413,7 +452,10 @@ class MediaDeckWindow:
 
     def _click(self, x: int, y: int, clicks: int) -> None:
         with self._frame_lock:
-            hit = next((r for r in self._regions
+            # Reversed: regions are appended in draw order, and what was
+            # painted last sits on top -- so an open flyout's rows must win
+            # over the search box and rows they cover, not lose to them.
+            hit = next((r for r in reversed(self._regions)
                         if r[0] <= x <= r[2] and r[1] <= y <= r[3]), None)
             row = next((r for r in self._rows
                         if r[0] <= x <= r[2] and r[1] <= y <= r[3]), None)
@@ -462,9 +504,26 @@ class MediaDeckWindow:
                 self._c.toggle_favorite(payload)
             elif action == 'toggle_sort':
                 self._sort_open = not self._sort_open
+                self._filter_open = False
             elif action == 'set_sort':
                 self._c.set_sort(payload[0], payload[1])
                 self._sort_open = False
+            elif action == 'toggle_filter_flyout':
+                self._filter_open = not self._filter_open
+                self._sort_open = False
+            elif action == 'filter_cat':
+                self._filter_expanded = (None if self._filter_expanded == payload
+                                         else payload)
+            elif action == 'filter_val':
+                if hasattr(self._c, 'toggle_filter'):
+                    self._c.toggle_filter(payload[0], payload[1])
+                    self._sel = 0
+                    self._scroll = 0
+            elif action == 'filter_clear':
+                if hasattr(self._c, 'clear_filters'):
+                    self._c.clear_filters()
+                    self._sel = 0
+                    self._scroll = 0
             elif action == 'pl_flyout':
                 self._pl_open = not self._pl_open
             elif action == 'pl_select':
@@ -503,8 +562,24 @@ class MediaDeckWindow:
             self._menu = None
             return
         with self._frame_lock:
+            pl_row = next((r for r in self._pl_rects
+                           if r[0] <= x <= r[2] and r[1] <= y <= r[3]), None)
             row = next((r for r in self._rows
                         if r[0] <= x <= r[2] and r[1] <= y <= r[3]), None)
+        if pl_row is not None:               # a playlist in the open flyout
+            name = pl_row[4]
+            pls = getattr(self._c, 'playlists', None)
+            missing = (len(pls.missing(name))
+                       if pls is not None and hasattr(pls, 'missing') else 0)
+            items: list[tuple[str, str, Any]] = [
+                ('Rename…', 'pl_rename', name),
+                ('Duplicate', 'pl_dup', name),
+            ]
+            if missing:
+                items.append((f'Prune {missing} missing', 'pl_prune', name))
+            items.append(('Delete playlist…', 'pl_del_arm', name))
+            self._menu = {'x': x, 'y': y, 'name': name, 'items': items}
+            return
         if row is None:
             return
         self._sel = row[4]
@@ -515,9 +590,14 @@ class MediaDeckWindow:
         items: list[tuple[str, str, Any]] = [('Play', 'play_row', idx)]
         pls = getattr(self._c, 'playlists', None)
         if getattr(self._c, 'mode', 'library') == 'playlists':
-            items += [('Remove from playlist', 'pl_remove', self._sel),
-                      ('Move up', 'pl_move', (self._sel, -1)),
-                      ('Move down', 'pl_move', (self._sel, 1))]
+            # By path, not by view row: the view can be sorted or filtered, so
+            # its row numbers are not the stored ones -- editing by row would
+            # hit a different track than the one right-clicked.
+            rpath = (self._c.snapshot_path_at(idx)
+                     if hasattr(self._c, 'snapshot_path_at') else None)
+            items += [('Remove from playlist', 'pl_remove', rpath),
+                      ('Move up', 'pl_move', (rpath, -1)),
+                      ('Move down', 'pl_move', (rpath, 1))]
         elif pls is not None:
             items.append(('Add to playlist »', 'add_menu', idx))
         if hasattr(self._c, 'is_favorite'):
@@ -640,6 +720,89 @@ class MediaDeckWindow:
             tr.append((bx, yy, bx + bw, yy + 20, act, None))
         return tr
 
+    # -- one-line text prompt (playlist rename) ----------------------------
+
+    def _prompt_key(self, sym: int, mod: int) -> None:
+        """Keystrokes while the prompt is open: Enter commits, Esc cancels.
+        ASCII only -- same constraint as the tag editor."""
+        pr = self._prompt
+        if pr is None:
+            return
+        if sym == sdl2.SDLK_ESCAPE:
+            self._prompt = None
+            return
+        if sym in (sdl2.SDLK_RETURN, sdl2.SDLK_KP_ENTER):
+            self._prompt_commit()
+            return
+        cur = str(pr.get('value', ''))
+        if sym == sdl2.SDLK_BACKSPACE:
+            pr['value'] = cur[:-1]
+        elif 32 <= sym < 127:
+            ch = chr(sym)
+            if mod & (sdl2.KMOD_LSHIFT | sdl2.KMOD_RSHIFT):
+                ch = ch.upper()
+            pr['value'] = cur + ch
+        else:
+            return
+        pr['msg'] = ''
+
+    def _prompt_commit(self) -> None:
+        pr = self._prompt
+        if pr is None:
+            return
+        action = pr.get('action')
+        ok, msg = (action(str(pr.get('value', '')).strip())
+                   if callable(action) else (False, 'nothing to do'))
+        if not ok:
+            pr['msg'] = msg
+            return
+        self._prompt = None
+
+    def _click_prompt(self, x: int, y: int) -> None:
+        with self._frame_lock:
+            hit = next((r for r in self._prompt_rects
+                        if r[0] <= x <= r[2] and r[1] <= y <= r[3]), None)
+        if hit is None:
+            return                         # modal: outside clicks do nothing
+        if hit[4] == 'prompt_save':
+            self._prompt_commit()
+        elif hit[4] == 'prompt_cancel':
+            self._prompt = None
+
+    def _draw_prompt(self, d, w, h) -> list:
+        """The one-field prompt modal; returns its click rects."""
+        pr = self._prompt
+        if pr is None:
+            return []
+        pw, ph = 400, 118
+        x0 = max(8, (w - pw) // 2)
+        y0 = max(8, (h - ph) // 2)
+        rects: list = []
+        d.rectangle([x0 - 2, y0 - 2, x0 + pw + 2, y0 + ph + 2], outline=_EDGE)
+        d.rectangle([x0, y0, x0 + pw, y0 + ph], fill=_PANEL, outline=_HOT)
+        d.text((x0 + 14, y0 + 10), str(pr.get('title', ''))[:40],
+               font=self._font_b, fill=_WAVE_HI)
+        d.text((x0 + 14, y0 + 28), str(pr.get('label', ''))[:52],
+               font=self._font_s, fill=_FAINT)
+        bx0, bx1, by = x0 + 14, x0 + pw - 14, y0 + 46
+        d.rectangle([bx0, by, bx1, by + 22], fill=_BG, outline=_EDGE)
+        val = str(pr.get('value', ''))[-52:]
+        d.text((bx0 + 6, by + 5), val, font=self._font_s, fill=_TEXT)
+        cx = bx0 + 6 + len(val) * 6
+        d.rectangle([cx, by + 4, cx + 1, by + 18], fill=_HOT)
+        if pr.get('msg'):
+            d.text((x0 + 14, by + 26), str(pr['msg'])[:52],
+                   font=self._font_s, fill=_WARN)
+        yy = y0 + ph - 28
+        for lab, act, col in (('SAVE', 'prompt_save', _HOT),
+                              ('CANCEL', 'prompt_cancel', _DIM)):
+            bw = len(lab) * 6 + 20
+            bx = (x0 + pw - 14 - bw) if act == 'prompt_save' else (x0 + 14)
+            d.rectangle([bx, yy, bx + bw, yy + 20], fill=_BG, outline=col)
+            d.text((bx + 10, yy + 5), lab, font=self._font_s, fill=col)
+            rects.append((bx, yy, bx + bw, yy + 20, act, None))
+        return rects
+
     def _click_menu(self, x: int, y: int) -> None:
         menu = self._menu
         with self._frame_lock:
@@ -670,8 +833,13 @@ class MediaDeckWindow:
                         log.info('media-deck: added to %s', name)
                 self._menu = None
             elif action == 'pl_remove':
-                if pls is not None and self._c.active_playlist:
-                    pls.remove(self._c.active_playlist, payload)
+                if pls is not None and self._c.active_playlist and payload:
+                    if hasattr(pls, 'remove_path'):
+                        pls.remove_path(self._c.active_playlist, payload)
+                    else:
+                        pls.remove(self._c.active_playlist,
+                                   pls.tracks(self._c.active_playlist)
+                                   .index(payload))
                 self._menu = None
             elif action == 'fav':
                 self._c.toggle_favorite(payload)
@@ -695,9 +863,50 @@ class MediaDeckWindow:
                 self._menu = None
             elif action == 'pl_move':
                 if pls is not None and self._c.active_playlist:
-                    pos, delta = payload
-                    pls.move(self._c.active_playlist, pos, delta)
-                    self._sel = max(0, pos + delta)
+                    mpath, delta = payload
+                    if mpath and hasattr(pls, 'move_path'):
+                        pls.move_path(self._c.active_playlist, mpath, delta)
+                        self._sel = max(0, min(len(self._view()) - 1,
+                                               self._sel + delta))
+                self._menu = None
+            elif action == 'pl_rename':
+                pls_name = payload
+
+                def _do_rename(text: str) -> tuple[bool, str]:
+                    if pls is None or not hasattr(pls, 'rename'):
+                        return False, 'rename needs a newer store'
+                    if not pls.rename(pls_name, text):
+                        return False, 'name is taken or blank'
+                    if self._c.active_playlist == pls_name:
+                        self._c.active_playlist = text.strip()
+                    return True, ''
+
+                self._prompt = {'title': 'RENAME PLAYLIST',
+                                'label': pls_name,
+                                'value': str(pls_name),
+                                'action': _do_rename, 'msg': ''}
+                self._menu = None
+            elif action == 'pl_dup':
+                if pls is not None and hasattr(pls, 'duplicate'):
+                    copy = pls.duplicate(payload)
+                    if copy:
+                        self._c.active_playlist = copy
+                self._menu = None
+            elif action == 'pl_prune':
+                if pls is not None and hasattr(pls, 'prune_missing'):
+                    gone = pls.prune_missing(payload)
+                    log.info('media-deck: pruned %d dead path(s) from %r',
+                             gone, payload)
+                self._menu = None
+            elif action == 'pl_del_arm':   # arm: the next click really deletes
+                menu['items'] = [('SURE? DELETE PLAYLIST', 'pl_del_do', payload),
+                                 ('Cancel', 'del_cancel', None)]
+            elif action == 'pl_del_do':
+                if pls is not None:
+                    pls.delete(payload)
+                    if self._c.active_playlist == payload:
+                        names = pls.names()
+                        self._c.active_playlist = names[0] if names else None
                 self._menu = None
         except Exception as exc:
             log.warning('media-deck: menu action %s failed: %s', action, exc)
@@ -705,20 +914,70 @@ class MediaDeckWindow:
 
     # -- drawing ------------------------------------------------------------
 
+    def _levels(self) -> tuple[float, float, float, float]:
+        """(bass, mid, treble, beat) from the controller, always 4-long."""
+        lv = getattr(self._c, 'audio_levels', None) or ()
+        try:
+            out = tuple(float(v) for v in lv)[:4]
+        except (TypeError, ValueError):
+            out = ()
+        return out + (0.0,) * (4 - len(out))
+
+    def _tip(self, tips: list, x0, y0, x1, y1, text: str) -> None:
+        """Register a hover tooltip region (no-op on a core without them)."""
+        if _TIPS_OK:
+            tips.append(TooltipRegion(
+                (int(x0), int(y0), int(x1 - x0), int(y1 - y0)), text))
+
+    def _render_tooltip(self, d, tips: list, w: int, h: int) -> None:
+        """Feed the shared hover tracker and draw the active bubble.
+
+        Motion + timing + draw all happen on the render thread, fed by the
+        cursor position the event handler last captured, so the core tracker
+        stays single-threaded as it expects.  A modal or menu on screen
+        suppresses tips: the bubble would float over an unrelated surface.
+        """
+        tracker = self._tips_tracker
+        if tracker is None or not tips:
+            return
+        if (self._menu is not None or self._tag_edit is not None
+                or self._prompt is not None):
+            tracker.reset()
+            return
+        mx, my = self._mouse_xy
+        if mx < 0:
+            tracker.reset()
+            return
+        tracker.on_motion(mx, my, tips)
+        tip = tracker.tick()
+        if tip is not None and tracker.anchor is not None:
+            draw_tooltip_pil(
+                d, tip.text, tracker.anchor, (w, h), font=self._font_s,
+                bg=_PANEL2[:3], border=_EDGE[:3], text_color=_TEXT[:3])
+
     def _render_ui(self) -> 'Image.Image':
         w, h = self._width, self._height
         img = Image.new('RGBA', (w, h), _BG)
         d = ImageDraw.Draw(img, 'RGBA')
         regions: list = []
         rows: list = []
+        tips: list = []
         snap = self._c.snapshot()
         playing = bool(snap.get('is_playing'))
         pos = float(snap.get('position_s', 0.0) or 0.0)
         dur = float(snap.get('duration_s', 0.0) or 0.0)
+        levels = self._levels()
 
-        # Header band.
+        # Header band, with a slow light sweep riding the rule underneath —
+        # brighter when the room is loud, a faint patrol when it is quiet.
         d.rectangle([0, 0, w, 46], fill=_PANEL2)
         d.line([0, 46, w, 46], fill=_EDGE)
+        if playing:
+            seg = max(60, w // 6)
+            sx = int((time.monotonic() * 0.09 % 1.0) * (w + seg)) - seg
+            a = 90 + int(140 * levels[0])
+            d.line([max(0, sx), 46, min(w, sx + seg), 46],
+                   fill=_WAVE_HI[:3] + (min(255, a),), width=2)
         d.text((16, 12), 'UNICORN VIZ  //  MEDIA DECK', font=self._font_title,
                fill=_EDGE)
         status = str(snap.get('status', 'off') or 'off').upper()
@@ -735,23 +994,29 @@ class MediaDeckWindow:
         d.rectangle([gap - 4, top, deck_w - 4, h - gap], fill=_PANEL)
         d.rectangle([gap - 4, top, deck_w - 4, top + 3], fill=_EDGE)
 
-        # Platter — the showpiece.
+        # Platter — the showpiece.  Slightly smaller than it used to be so the
+        # spectrum ring around it has air to breathe into.
         pl_h = int(h * 0.46)
         self._draw_platter(d, (lx0 + lx1) // 2, top + 14 + pl_h // 2,
-                           min(pl_h // 2 - 8, (lx1 - lx0) // 2 - 30),
-                           playing, pos, dur)
+                           min(pl_h // 2 - 18, (lx1 - lx0) // 2 - 30),
+                           playing, pos, dur, levels)
         cy = top + 24 + pl_h
 
         # Now playing block.
         title = str(snap.get('title', '') or '') or '—'
         artist = str(snap.get('artist', '') or '')
         album = str(snap.get('album', '') or '')
+        genre = str(snap.get('genre', '') or '')
+        year = str(snap.get('year', '') or '')
         prev_t = str(snap.get('previous_title', '') or '')
         prev_a = str(snap.get('previous_artist', '') or '')
         maxc = max(10, (lx1 - lx0 - 8) // 10)
         d.text((lx0 + 6, cy), title[:maxc], font=self._font_h, fill=_WAVE_HI)
+        np_top = cy
         cy += 22
         line2 = artist + (f'  ·  {album}' if album else '')
+        if year:
+            line2 += f'  ({year})'
         d.text((lx0 + 6, cy), line2[:maxc + 14] or ' ', font=self._font_b,
                fill=_TEXT)
         cy += 18
@@ -759,6 +1024,13 @@ class MediaDeckWindow:
             d.text((lx0 + 6, cy), f'prev: {prev_a} - {prev_t}'[:maxc + 20],
                    font=self._font_s, fill=_FAINT)
         cy += 18
+        self._tip(tips, lx0 + 6, np_top, lx1 - 6, cy - 2,
+                  '\n'.join(x for x in (
+                      title,
+                      f'by {artist}' if artist else '',
+                      f'on {album}' if album else '',
+                      ' · '.join(v for v in (genre, year) if v),
+                      f'prev: {prev_a} - {prev_t}' if prev_t else '') if x))
 
         # Progress bar (click-to-seek on the VLC backend).
         can_seek = bool(getattr(self._c, 'can_seek', False))
@@ -773,6 +1045,8 @@ class MediaDeckWindow:
         if can_seek:
             regions.append((lx0 + 6, bar_y - 4, lx1 - 6, bar_y + 16, 'seek',
                             (lx0 + 6, lx1 - 6, dur)))
+            self._tip(tips, lx0 + 6, bar_y - 4, lx1 - 6, bar_y + 16,
+                      'Click anywhere on the bar to jump there')
         d.text((lx0 + 6, bar_y + 16), _fmt_time(pos), font=self._font_s,
                fill=_TEXT)
         tw = len(_fmt_time(dur)) * 6
@@ -792,6 +1066,10 @@ class MediaDeckWindow:
              _HOT, (10, int(30 + 40 * pulse), 26, 255) if playing else None, 2),
             ('►|', 'next', _TEXT, None, 1),
         ]
+        btn_tips = {'prev': 'Previous track — or restart this one past 3 s '
+                            '(Ctrl+Alt+B)',
+                    'play': 'Play / pause (Ctrl+Alt+M, or Space in here)',
+                    'next': 'Next track (Ctrl+Alt+N)'}
         for label, act, col, fill, units in buttons:
             bwu = bw * units + (6 * (units - 1))
             d.rectangle([bx, cy, bx + bwu, cy + th],
@@ -800,6 +1078,7 @@ class MediaDeckWindow:
             d.text((bx + max(4, (bwu - len(label) * 7) // 2), cy + 10), label,
                    font=self._font_b, fill=col)
             regions.append((bx, cy, bx + bwu, cy + th, act, None))
+            self._tip(tips, bx, cy, bx + bwu, cy + th, btn_tips.get(act, ''))
             bx += bwu + 6
         # Repeat (loop) toggle: ALL (lit) -> ONE (lit + 1) -> OFF (dim).
         rep = str(snap.get('repeat', 'all') or 'all')
@@ -817,6 +1096,10 @@ class MediaDeckWindow:
         if rep == 'one':
             d.text((icx - 2, icy - 5), '1', font=self._font_s, fill=icol)
         regions.append((bx, cy, bx + bw, cy + th, 'repeat', None))
+        self._tip(tips, bx, cy, bx + bw, cy + th,
+                  f'Repeat: {rep.upper()}.  ALL wraps the open list, ONE '
+                  f'repeats this track, OFF stops at the end of the list '
+                  f'(and announces the session is over).')
         bx += bw + 6
         # Shuffle icon toggle (crossing arrows, mixer-style).
         on = bool(snap.get('shuffle', False))
@@ -830,6 +1113,9 @@ class MediaDeckWindow:
         d.line([icx + 7, icy - 5, icx + 2, icy - 5], fill=icol)
         d.line([icx + 7, icy + 5, icx + 2, icy + 5], fill=icol)
         regions.append((bx, cy, bx + bw, cy + th, 'shuffle', None))
+        self._tip(tips, bx, cy, bx + bw, cy + th,
+                  'Shuffle (Ctrl+Alt+Shift+M) — takes effect on the next '
+                  'advance')
         bx += bw + 6
         # Volume slider (VLC backend only).
         if getattr(self._c, 'can_volume', False):
@@ -843,6 +1129,9 @@ class MediaDeckWindow:
                 d.rectangle([bx, cy + 12, bx + vw, cy + 22], fill=_HOT)
             d.text((bx, cy + 24), f'{vol}%', font=self._font_s, fill=_FAINT)
             regions.append((bx, cy + 6, vx1, cy + 28, 'volume', (bx, vx1)))
+            self._tip(tips, bx, cy + 6, vx1, cy + 28,
+                      'Volume, 0–200% (VLC backend).  100% is unity gain; '
+                      'past it VLC amplifies.')
 
         # Options checkboxes (bottom-left stack).  One helper so every box has
         # the same generous full-row hit target — small/adjacent click regions
@@ -883,8 +1172,15 @@ class MediaDeckWindow:
         pls = getattr(self._c, 'playlists', None)
         ty = top + 6
         tabx = rx0 + 4
-        for label, m in (('LIBRARY', 'library'), ('PLAYLISTS', 'playlists'),
-                         ('♥ FAVS', 'favorites')):  # heart sized by tab font
+        for label, m, tip in (
+                ('LIBRARY', 'library',
+                 'The whole scanned folder, one crate per subfolder.'),
+                ('PLAYLISTS', 'playlists',
+                 'Your ordered lists.  Playback follows the open one.'),
+                ('♥ FAVS', 'favorites',
+                 'Every track you have hearted, wherever it lives.'),
+                ('RECENT', 'recent',
+                 'The last 50 tracks that actually played, newest first.')):
             on = mode == m
             tw2 = len(label) * 6 + 16
             if on:
@@ -895,6 +1191,7 @@ class MediaDeckWindow:
             d.text((tabx + 8, ty + 4), label, font=self._font_s,
                    fill=_TEXT if on else _DIM)
             regions.append((tabx, ty, tabx + tw2, ty + 18, 'set_mode', m))
+            self._tip(tips, tabx, ty, tabx + tw2, ty + 18, tip)
             tabx += tw2 + 4
         # How long this view is, not just how many rows -- a count answers
         # "how much have I got" only if you already know the tracks.  Files
@@ -903,20 +1200,47 @@ class MediaDeckWindow:
         stats_fn = getattr(self._c, 'view_stats', None)
         st = stats_fn() if callable(stats_fn) else {}
         has_stats = bool(st.get('count'))
+        nfilt = int(getattr(self._c, 'active_filter_count', 0) or 0)
         if has_stats:
             span = _fmt_time(st.get('duration_s', 0.0))
             unknown = int(st.get('unknown', 0))
-            d.text((rx0 + 4, ty + 22),
-                   f'{st["count"]} tracks · {span}' + ('+' if unknown else ''),
-                   font=self._font_s, fill=_FAINT)
-        # Sort flyout icon at the right edge of the tab row.
-        if mode in ('library', 'favorites'):
-            sox = rx1 - 26
-            skey = getattr(self._c, 'sort', (None, True))[0]
-            scol = _HOT if (self._sort_open or skey) else _DIM
-            d.rectangle([sox, ty, sox + 22, ty + 18], outline=scol)
-            d.text((sox + 4, ty + 4), '↑↓', font=self._font_s, fill=scol)
-            regions.append((sox, ty, sox + 22, ty + 18, 'toggle_sort', None))
+            text = f'{st["count"]} tracks · {span}' + ('+' if unknown else '')
+            d.text((rx0 + 4, ty + 22), text, font=self._font_s, fill=_FAINT)
+            if nfilt:
+                # The narrowed count needs a why on the same line, or a
+                # filtered library reads as a shrunken one.
+                d.text((rx0 + 8 + len(text) * 6, ty + 22),
+                       f'· {nfilt} filter{"s" if nfilt > 1 else ""}',
+                       font=self._font_s, fill=_HOT)
+        elif nfilt:
+            d.text((rx0 + 4, ty + 22), f'0 tracks · {nfilt} filter(s) on',
+                   font=self._font_s, fill=_WARN)
+        # Sort + filter icons at the right edge of the tab row.  Both work in
+        # every view now -- FILTER means one thing wherever you are standing.
+        sox = rx1 - 26
+        skey = getattr(self._c, 'sort', (None, True))[0]
+        scol = _HOT if (self._sort_open or skey) else _DIM
+        d.rectangle([sox, ty, sox + 22, ty + 18], outline=scol)
+        d.text((sox + 4, ty + 4), '↑↓', font=self._font_s, fill=scol)
+        regions.append((sox, ty, sox + 22, ty + 18, 'toggle_sort', None))
+        self._tip(tips, sox, ty, sox + 22, ty + 18,
+                  'Sort the view: artist, title, album, year, length, or '
+                  'scan order.  A playlist’s stored order is never '
+                  'rewritten -- sorting is how you look at it.')
+        if hasattr(self._c, 'toggle_filter'):
+            fox = sox - 26
+            fcol = _HOT if (self._filter_open or nfilt) else _DIM
+            d.rectangle([fox, ty, fox + 22, ty + 18], outline=fcol)
+            d.text((fox + 5, ty + 4), '≡', font=self._font_s, fill=fcol)
+            if nfilt:
+                d.text((fox + 13, ty + 4), str(min(nfilt, 9)),
+                       font=self._font_s, fill=_HOT)
+            regions.append((fox, ty, fox + 22, ty + 18,
+                            'toggle_filter_flyout', None))
+            self._tip(tips, fox, ty, fox + 22, ty + 18,
+                      'Facet filters: artist, album, genre, decade.  They '
+                      'apply in every view, and playback follows what they '
+                      'leave visible.')
         # The search row sits below the stats line when there is one, so the
         # two never share a strip -- inserted, not overlaid.
         sy = ty + (38 if has_stats else 24)
@@ -944,6 +1268,9 @@ class MediaDeckWindow:
         d.text((rx0 + 10, sy + 4), hint[:38], font=self._font_s,
                fill=_TEXT if q else _FAINT)
         regions.append((rx0 + 4, sy, rx1 - 4, sy + 18, 'focus_search', None))
+        self._tip(tips, rx0 + 4, sy, rx1 - 4, sy + 18,
+                  'Type to narrow the list by name.  Enter or Esc leaves the '
+                  'box; facet filters (≡) narrow further.')
         list_top = sy + 26
         list_bot = h - gap
         # Accordion crates: nested tree along the open path (depth-tinted).
@@ -989,6 +1316,10 @@ class MediaDeckWindow:
                            fill=_WARN if excluded else _DIM)
                     regions.append((ex, hy + 2, ex + 18, hy + hh - 4,
                                     'exclude_bucket', bkey))
+                    self._tip(tips, ex, hy + 2, ex + 18, hy + hh - 4,
+                              'Hide this crate everywhere — library, ALL, '
+                              'and playback' if not excluded else
+                              'Excluded.  Click to bring this crate back.')
                 hy += hh
             list_top = hy + 2
         # Rows.
@@ -1058,12 +1389,52 @@ class MediaDeckWindow:
                 d.text((rx1 - 26 - len_w, ry), f'{_fmt_time(dur):>6}',
                        font=self._font_s, fill=_muted(ncol))
             fav = bool(getattr(self._c, 'is_favorite', lambda _i: False)(idx))
-            d.text((rx1 - 21, ry - 2), '♥', font=self._font_heart,
-                   fill=(255, 80, 160, 255) if fav else (46, 58, 84, 255))
+            # Hover colours the glyph rather than boxing it: a rectangle round
+            # a heart looks like a bug, and the colour doubles as a preview of
+            # what clicking will do.
+            h_hov = (rx1 - 26 <= hx <= rx1 - 3
+                     and ry - 1 <= hy_m <= ry + row_h - 3)
+            if fav:
+                hcol = (255, 170, 210, 255) if h_hov else (255, 80, 160, 255)
+            else:
+                hcol = (190, 70, 125, 255) if h_hov else (46, 58, 84, 255)
+            d.text((rx1 - 21, ry - 2), '♥', font=self._font_heart, fill=hcol)
             regions.append((rx1 - 26, ry - 1, rx1 - 3, ry + row_h - 3,
                             'fav_toggle', idx))
+            self._tip(tips, rx1 - 26, ry - 1, rx1 - 3, ry + row_h - 3,
+                      'Heart / unheart this track')
             rows.append((rx0, ry - 1, rx1, ry + row_h - 3, i))
-        if not view and mode == 'favorites':
+            # Hovering the name shows the file's full metadata.  Registered
+            # after the heart so the heart's own tip still wins over it.
+            self._tip(tips, rx0, ry - 1, rx1 - 27, ry + row_h - 3,
+                      self._track_tip(idx, fav))
+        if not view:
+            # Say *why* the list is empty -- a blank pane reads as data loss.
+            q = self._query.strip()
+            nfilt2 = int(getattr(self._c, 'active_filter_count', 0) or 0)
+            if q or nfilt2:
+                d.text((rx0 + 14, list_top + 8), 'nothing matches —',
+                       font=self._font_s, fill=_FAINT)
+                d.text((rx0 + 14, list_top + 22),
+                       ('clear the search or the filters (≡)' if q and nfilt2
+                        else 'clear the search' if q
+                        else 'clear the filters (≡)'),
+                       font=self._font_s, fill=_FAINT)
+            elif mode == 'recent':
+                d.text((rx0 + 14, list_top + 8), 'nothing played yet —',
+                       font=self._font_s, fill=_FAINT)
+                d.text((rx0 + 14, list_top + 22),
+                       'every track that plays lands here, newest first',
+                       font=self._font_s, fill=_FAINT)
+            elif mode == 'playlists':
+                d.text((rx0 + 14, list_top + 8), 'this playlist is empty —',
+                       font=self._font_s, fill=_FAINT)
+                d.text((rx0 + 14, list_top + 22),
+                       'right-click library rows → Add to playlist »',
+                       font=self._font_s, fill=_FAINT)
+        if (not view and mode == 'favorites'
+                and not self._query.strip()
+                and not getattr(self._c, 'active_filter_count', 0)):
             d.text((rx0 + 14, list_top + 8), 'no favorites yet —',
                    font=self._font_s, fill=_FAINT)
             d.text((rx0 + 14, list_top + 22), 'click a track\u2019s ♥ to heart it',
@@ -1077,9 +1448,13 @@ class MediaDeckWindow:
             d.rectangle([rx1 - 2, bar_y, rx1, bar_y + bar_h], fill=_DIM)
         # Flyouts + context menu paint over the rows.
         menu_rects: list = []
-        if self._sort_open and mode in ('library', 'favorites'):
+        pl_rects: list = []
+        if self._sort_open:
             opts = (('Artist ↑', 'artist', True), ('Artist ↓', 'artist', False),
                     ('Title ↑', 'title', True), ('Title ↓', 'title', False),
+                    ('Album ↑', 'album', True), ('Album ↓', 'album', False),
+                    ('Year ↑', 'year', True), ('Year ↓', 'year', False),
+                    ('Length ↑', 'length', True), ('Length ↓', 'length', False),
                     ('Scan order', None, True))
             fy = ty + 22
             fx = rx1 - 130
@@ -1094,23 +1469,51 @@ class MediaDeckWindow:
                 regions.append((fx, ry2 - 1, rx1 - 4, ry2 + 17,
                                 'set_sort', (k, asc)))
                 ry2 += 18
+        if self._filter_open and hasattr(self._c, 'toggle_filter'):
+            self._draw_filter_flyout(d, rx0 + 4, ty + 22, rx1 - 4, list_bot,
+                                     regions)
         if self._pl_open and mode == 'playlists' and pls is not None:
             names = pls.names() or []
             fy = sy - 2
-            d.rectangle([rx0 + 4, fy, rx0 + 200, fy + 6 + 18 * max(1, len(names))],
+            fw = min(280, rx1 - rx0 - 8)
+            d.rectangle([rx0 + 4, fy, rx0 + 4 + fw,
+                         fy + 6 + 18 * max(1, len(names)) + 14],
                         fill=_PANEL, outline=_EDGE)
             ry2 = fy + 3
+            stats_of = getattr(self._c, 'playlist_stats', None)
             for n in names:
                 on = n == getattr(self._c, 'active_playlist', None)
+                pst = stats_of(n) if callable(stats_of) else {}
+                count = pst.get('count', len(pls.tracks(n)))
+                # A list's length is what you plan a session around, so it
+                # belongs on the row rather than behind a click.
+                tail = f' ({count} · {_hms(pst.get("duration_s", 0.0))})' \
+                    if pst else f' ({count})'
+                dead = int(pst.get('missing', 0) or 0)
                 d.text((rx0 + 12, ry2),
-                       f'{"●" if on else "○"} {n[:20]} ({len(pls.tracks(n))})',
+                       f'{"●" if on else "○"} {n[:20]}{tail}',
                        font=self._font_s, fill=_HOT if on else _DIM)
-                regions.append((rx0 + 4, ry2 - 1, rx0 + 200, ry2 + 17,
+                if dead:
+                    d.text((rx0 + 12 + (len(f'{n[:20]}{tail}') + 2) * 6, ry2),
+                           f'!{dead}', font=self._font_s, fill=_WARN)
+                regions.append((rx0 + 4, ry2 - 1, rx0 + 4 + fw, ry2 + 17,
                                 'pl_select', n))
+                pl_rects.append((rx0 + 4, ry2 - 1, rx0 + 4 + fw, ry2 + 17, n))
+                self._tip(tips, rx0 + 4, ry2 - 1, rx0 + 4 + fw, ry2 + 17,
+                          f'{n}\n{count} track(s) · '
+                          f'{_hms(pst.get("duration_s", 0.0))}'
+                          + (f'\n{dead} entry(ies) point at files that no '
+                             f'longer exist -- right-click to prune them'
+                             if dead else '')
+                          + '\n\nClick opens it.  Right-click: rename, '
+                            'duplicate, prune, delete.')
                 ry2 += 18
             if not names:
                 d.text((rx0 + 12, ry2), '(none — use + NEW)',
                        font=self._font_s, fill=_FAINT)
+                ry2 += 18
+            d.text((rx0 + 12, ry2), 'right-click a list to manage it',
+                   font=self._font_s, fill=_FAINT)
         if self._menu is not None:
             items = self._menu.get('items') or []
             mw, mh = 190, 24 + 20 * len(items)
@@ -1134,13 +1537,92 @@ class MediaDeckWindow:
         tag_rects: list = []
         if self._tag_edit is not None:      # modal: drawn last, over everything
             tag_rects = self._draw_tag_editor(d, w, h)
+        prompt_rects: list = []
+        if self._prompt is not None:
+            prompt_rects = self._draw_prompt(d, w, h)
+
+        self._render_tooltip(d, tips, w, h)
 
         with self._frame_lock:
             self._regions = regions
             self._rows = rows
             self._menu_rects = menu_rects
             self._tag_rects = tag_rects
+            self._prompt_rects = prompt_rects
+            self._pl_rects = pl_rects
         return img
+
+    #: Filter facets, in panel order, with listener-facing labels.
+    _FILTER_CATS = (('ARTIST', 'artist'), ('ALBUM', 'album'),
+                    ('GENRE', 'genre'), ('DECADE', 'decade'))
+
+    def _draw_filter_flyout(self, d, x, y, x1, y_max, regions) -> None:
+        """Faceted filter panel over the rows: categories -> ☑/☐ values.
+
+        The mixer's browser filter, media-player facets (no BPM, no stems).
+        Values come from the whole library, so narrowing by one facet never
+        hides another facet's remaining choices.
+        """
+        row_h = 18
+        ph = min(y_max - y - 4, 6 + row_h * (len(self._FILTER_CATS) + 1)
+                 + (row_h * len(self._c.distinct(self._filter_expanded))
+                    if self._filter_expanded else 0))
+        d.rectangle([x, y, x1, y + max(ph, 40)], fill=_PANEL2, outline=_EDGE)
+        cyf = y + 4
+        d.text((x + 6, cyf), 'FILTER', font=self._font_s, fill=_EDGE)
+        d.text((x1 - 42, cyf), 'clear', font=self._font_s, fill=_WARN)
+        regions.append((x1 - 46, cyf - 1, x1 - 2, cyf + 13,
+                        'filter_clear', None))
+        cyf += row_h
+        for label, facet in self._FILTER_CATS:
+            if cyf + row_h > y_max:
+                break
+            expanded = self._filter_expanded == facet
+            d.text((x + 6, cyf), f'{"▼" if expanded else "►"} {label}',
+                   font=self._font_s, fill=_TEXT)
+            regions.append((x, cyf - 1, x1, cyf + row_h - 3,
+                            'filter_cat', facet))
+            cyf += row_h
+            if not expanded:
+                continue
+            values = self._c.distinct(facet)
+            if not values:
+                d.text((x + 22, cyf), '(nothing tagged yet)',
+                       font=self._font_s, fill=_FAINT)
+                cyf += row_h
+                continue
+            for val in values:
+                if cyf + row_h > y_max:
+                    break
+                on = self._c.is_filtered(facet, val)
+                d.text((x + 22, cyf), f'{"☑" if on else "☐"} {str(val)[:30]}',
+                       font=self._font_s, fill=_HOT if on else _DIM)
+                regions.append((x + 18, cyf - 1, x1, cyf + row_h - 3,
+                                'filter_val', (facet, val)))
+                cyf += row_h
+
+    def _track_tip(self, idx: int, fav: bool) -> str:
+        """The hover card for a library row: every tag the file carries."""
+        info_fn = getattr(self._c, 'track_info', None)
+        info = info_fn(idx) if callable(info_fn) else {}
+        if not info:
+            return ''
+        lines = [info.get('title') or Path(info.get('path', '')).stem]
+        if info.get('artist'):
+            lines.append(f'by {info["artist"]}')
+        if info.get('album'):
+            lines.append(f'on {info["album"]}')
+        gy = ' · '.join(v for v in (info.get('genre'), info.get('year')) if v)
+        if gy:
+            lines.append(gy)
+        if info.get('duration_s', 0.0) > 0.0:
+            lines.append(_fmt_time(info['duration_s']))
+        if info.get('bucket'):
+            lines.append(f'crate: {info["bucket"]}')
+        if fav:
+            lines.append('♥ hearted')
+        lines.append('\ndouble-click plays · right-click for more')
+        return '\n'.join(lines)
 
     # The playing row's pulse, in seconds per cycle.  Slow on purpose: this
     # sits behind text you are reading, and anything quicker turns a list into
@@ -1168,20 +1650,34 @@ class MediaDeckWindow:
         d.rectangle([x0 + 3, y0 + 1, x1 - 1, y0 + max(2, (y1 - y0) // 3)],
                     fill=glow + (14 + int(34 * pulse),))
 
-    def _draw_platter(self, d, cx, cyc, r, playing, pos, dur) -> None:
-        """The neon platter, media-deck flavour: cyan glow breathing with a
-        slow pulse while playing, grooves, strobe spokes, orbiting sparkles,
-        and a progress arc dot riding the rim."""
+    def _draw_platter(self, d, cx, cyc, r, playing, pos, dur,
+                      levels=(0.0, 0.0, 0.0, 0.0)) -> None:
+        """The neon platter, media-deck flavour — and now it *hears* the room.
+
+        Cyan glow breathing with a slow pulse while playing, deepened by live
+        bass; a beat flash on the outer rim; a radial spectrum ring orbiting
+        the record; grooves, strobe spokes (thicker with treble), orbiting
+        sparkles, and a progress dot riding the rim.  Silence degrades to the
+        old purely time-driven look, so a core without audio levels loses the
+        reactivity and nothing else.
+        """
         if r < 40:
             return
+        bass, _mid, treble, beat = (tuple(levels) + (0.0,) * 4)[:4]
         ring = _EDGE if playing else _DIM
         pulse = 0.5 + 0.5 * abs((time.monotonic() * 0.9) % 2.0 - 1.0)
         glow = 3 if playing else 2
         for i in range(glow, 0, -1):
-            a = int((70 + 50 * pulse) / i) if playing else int(50 / i)
+            a = (int((70 + 50 * pulse + 90 * bass) / i) if playing
+                 else int(50 / i))
             d.ellipse([cx - r - 2 * i, cyc - r - 2 * i,
                        cx + r + 2 * i, cyc + r + 2 * i],
-                      outline=ring[:3] + (a,))
+                      outline=ring[:3] + (min(255, a),))
+        # Beat flash: one extra rim ring that spikes on the detector's beat
+        # and decays with it -- the platter visibly *thumps*.
+        if playing and beat > 0.05:
+            d.ellipse([cx - r - 8, cyc - r - 8, cx + r + 8, cyc + r + 8],
+                      outline=_WAVE_HI[:3] + (int(160 * beat),))
         d.ellipse([cx - r, cyc - r, cx + r, cyc + r], fill=(7, 8, 15, 255),
                   outline=ring)
         for gi in range(4, 10):
@@ -1190,6 +1686,26 @@ class MediaDeckWindow:
                       outline=(70, 88, 122, 36))
         import math
         ang = 2.0 * math.pi * pos * self._REV_PER_S
+        # Radial spectrum: the app's live FFT as bars around the record,
+        # counter-rotating slowly against the spin.  This is the drip.
+        spec = getattr(self._c, 'audio_spectrum', ()) or ()
+        if playing and spec:
+            n = len(spec) * 2                       # mirrored: full circle
+            base_a = -ang * 0.25
+            for k in range(n):
+                v = float(spec[k if k < len(spec) else n - 1 - k])
+                if v <= 0.02:
+                    continue
+                sa = base_a + 2.0 * math.pi * k / n
+                r0 = r + 6
+                r1 = r + 6 + 4 + v * 12
+                x0p = cx + r0 * math.cos(sa)
+                y0p = cyc + r0 * math.sin(sa)
+                x1p = cx + r1 * math.cos(sa)
+                y1p = cyc + r1 * math.sin(sa)
+                col = _YELLOW if v > 0.8 else _WAVE_HI
+                d.line([x0p, y0p, x1p, y1p],
+                       fill=col[:3] + (60 + int(180 * v),), width=2)
         for spoke_a, col in ((ang, _TEXT), (ang + math.pi, (110, 130, 165, 140))):
             sx = cx + (r - 4) * math.cos(spoke_a)
             sy = cyc + (r - 4) * math.sin(spoke_a)
@@ -1198,8 +1714,11 @@ class MediaDeckWindow:
             d.line([lx, ly, sx, sy], fill=col, width=2)
         if playing:
             phase = int(pos * 8)
+            # Treble opens the sparkle gate: a busy top end fills the platter
+            # with glints, a dark drop leaves only the steady pair.
+            gate = 2 + int(2 * min(1.0, max(0.0, treble)))
             for i in range(12):
-                if (i * 7 + phase) % 5 >= 2:
+                if (i * 7 + phase) % 5 >= gate:
                     continue
                 sa = i * 2.399963 + ang * 0.5
                 sr2 = r * (0.5 + 0.45 * ((i * 37 % 97) / 97.0))

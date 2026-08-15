@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.23.0'
+__version__ = '0.24.0'
 
 import logging
 import os
@@ -51,22 +51,50 @@ _AUDIO_EXTS: frozenset[str] = frozenset({
 # Fallback subprocess players tried in order when VLC is unavailable
 _FALLBACK_PLAYERS: tuple[str, ...] = ('mpv', 'ffplay', 'aplay')
 
+# Faceted-filter categories (the mixer's tag facets, minus the DJ-only
+# BPM/stems ones).  'decade' is derived from the year tag: a listener thinks
+# "90s", not "match 1990..1999", the same way a DJ thinks in BPM ranges.
+_FACETS: tuple[str, ...] = ('artist', 'album', 'genre', 'decade')
 
-def _read_tags(path: Path) -> dict[str, str]:
-    """Return {'title', 'artist', 'album', 'duration_s'} from audio tags.
+# Sortable columns.  'length' and 'year' are numeric; missing values sort
+# last so real answers surface first in either direction.
+_SORT_KEYS: tuple[str, ...] = ('title', 'artist', 'album', 'year', 'length')
+
+
+def _decade_of(year: str) -> str:
+    """'1994' -> '1990s'; '' when the year is unknown."""
+    y = str(year or '')
+    return f'{y[:3]}0s' if len(y) == 4 and y.isdigit() else ''
+
+
+def _year_of(date_tag: str) -> str:
+    """The four-digit year at the front of a date tag ('' when unparseable).
+
+    Date tags arrive as '1994', '1994-06-01', or free text; only the year is
+    displayable or filterable, so only the year is kept.
+    """
+    s = str(date_tag or '').strip()
+    return s[:4] if len(s) >= 4 and s[:4].isdigit() else ''
+
+
+def _read_tags(path: Path) -> dict[str, Any]:
+    """Return {'title', 'artist', 'album', 'genre', 'year', 'duration_s'}.
 
     Falls back gracefully when mutagen is unavailable or tags are absent.
     """
     title = path.stem
     artist = ''
     album = ''
+    genre = ''
+    year = ''
     duration_s = 0.0
 
     try:
         import mutagen  # noqa: PLC0415
         f = mutagen.File(str(path), easy=True)
         if f is None:
-            return {'title': title, 'artist': artist, 'album': album, 'duration_s': duration_s}
+            return {'title': title, 'artist': artist, 'album': album,
+                    'genre': genre, 'year': year, 'duration_s': duration_s}
         if f.info and hasattr(f.info, 'length'):
             duration_s = max(0.0, float(f.info.length or 0.0))
         tags = f.tags or {}
@@ -86,10 +114,13 @@ def _read_tags(path: Path) -> dict[str, str]:
         al = _tag('album')
         if al:
             album = al
+        genre = _tag('genre')
+        year = _year_of(_tag('date') or _tag('year'))
     except Exception as exc:
         log.debug('media-01: mutagen error on %s: %s', path.name, exc)
 
-    return {'title': title, 'artist': artist, 'album': album, 'duration_s': duration_s}
+    return {'title': title, 'artist': artist, 'album': album,
+            'genre': genre, 'year': year, 'duration_s': duration_s}
 
 
 # Background library-scan cache, keyed by resolved media-dir string.  Populated
@@ -475,6 +506,16 @@ class MediaController:
         self._title: str = ''
         self._artist: str = ''
         self._album: str = ''
+        self._genre: str = ''
+        self._year: str = ''
+        # Faceted filters: facet -> selected value set (empty = no filter).
+        self._filters: dict[str, set] = {}
+        # Live audio levels for the Media Deck's reactive chrome: (bass, mid,
+        # treble, beat) in [0, 1], plus a coarse 16-band spectrum.  Written on
+        # the main thread in update(), read by the deck's render thread --
+        # whole-tuple assignment, so a reader never sees a half-written frame.
+        self.audio_levels: tuple[float, float, float, float] = (0.0,) * 4
+        self.audio_spectrum: tuple[float, ...] = ()
         self._duration_s: float = 0.0
         self._position_s: float = 0.0
         self._is_playing: bool = False
@@ -685,7 +726,7 @@ class MediaController:
             self.crossfade_enabled = bool(p['crossfade'])
         if 'volume' in p:
             self.set_volume(int(p['volume']))
-        if p.get('mode') in ('library', 'playlists', 'favorites'):
+        if p.get('mode') in ('library', 'playlists', 'favorites', 'recent'):
             self.mode = p['mode']
         if p.get('active_playlist'):
             self.active_playlist = str(p['active_playlist'])
@@ -800,6 +841,32 @@ class MediaController:
         return [(i, *parts[i]) for i in self.view_indices()
                 if 0 <= i < len(parts)]
 
+    def playlist_stats(self, name: str) -> dict:
+        """Count, running time, unknown-length and dead-path counts for one
+        playlist -- what the picker prints on the row, so choosing a list is
+        an informed act rather than a gamble on a bare name."""
+        store = self._playlists
+        paths = store.tracks(name) if store is not None else []
+        by_path = {str(t.get('path', '')): t for t in self._library}
+        total = 0.0
+        unknown = 0
+        missing = 0
+        for p in paths:
+            t = by_path.get(p)
+            if t is None:
+                missing += 1
+                continue
+            try:
+                dur = float(t.get('duration_s', 0.0) or 0.0)
+            except (TypeError, ValueError):
+                dur = 0.0
+            if dur > 0.0:
+                total += dur
+            else:
+                unknown += 1
+        return {'count': len(paths), 'duration_s': total,
+                'unknown': unknown, 'missing': missing}
+
     def view_stats(self) -> dict:
         """Count, running time and how much of it is unknown, for the header.
 
@@ -817,12 +884,13 @@ class MediaController:
     # Subsystem interface (called by app.py)
     # ------------------------------------------------------------------
 
-    def update(self, dt: float, audio: Any) -> None:  # noqa: ARG002
+    def update(self, dt: float, audio: Any) -> None:
         """Poll playback state; advance to next track when current one ends."""
         if not self.enabled or self._backend is None:
             return
 
         now = time.monotonic()
+        self._capture_audio_levels(audio)
 
         tick = getattr(self._backend, 'tick', None)
         if callable(tick):
@@ -880,6 +948,34 @@ class MediaController:
             self.close_window()          # window self-closed (Esc Esc)
 
         self._publish_track_path()
+
+    def _capture_audio_levels(self, audio: Any) -> None:
+        """Mirror the app's live audio analysis for the Media Deck's chrome.
+
+        Only while the deck window is open -- the platter glow, beat flash and
+        spectrum ring are the sole consumers, so with the window closed this
+        is pure waste.  Whole-tuple assignment keeps the render thread's reads
+        tear-free without a lock.
+        """
+        if self._window is None or audio is None:
+            return
+        try:
+            self.audio_levels = (
+                min(1.0, max(0.0, float(getattr(audio, 'bass', 0.0) or 0.0))),
+                min(1.0, max(0.0, float(getattr(audio, 'mid', 0.0) or 0.0))),
+                min(1.0, max(0.0, float(getattr(audio, 'treble', 0.0) or 0.0))),
+                min(1.0, max(0.0, float(getattr(audio, 'beat', 0.0) or 0.0))),
+            )
+            fft = getattr(audio, 'fft', None)
+            if fft is not None and len(fft) >= 512:
+                # 512 smoothed bands folded to 16 -- coarse on purpose: the
+                # deck draws a ring of chunky bars, not an analyzer.
+                bands = fft[:512].reshape(16, 32).mean(axis=1)
+                self.audio_spectrum = tuple(
+                    min(1.0, max(0.0, float(v))) for v in bands)
+        except Exception:                  # never let chrome break playback
+            self.audio_levels = (0.0, 0.0, 0.0, 0.0)
+            self.audio_spectrum = ()
 
     def _publish_track_path(self) -> None:
         """Publish the currently playing track's local file path.
@@ -999,15 +1095,66 @@ class MediaController:
         return state
 
     def set_sort(self, key: str | None, ascending: bool = True) -> None:
-        self._sort_key = key if key in ('title', 'artist') else None
+        self._sort_key = key if key in _SORT_KEYS else None
         self._sort_asc = bool(ascending)
 
     @property
     def sort(self) -> tuple:
         return self._sort_key, self._sort_asc
 
+    # -- faceted filters (the mixer's tag facets, media-player flavour) --------
+
+    def distinct(self, facet: str) -> list[str]:
+        """Distinct values for *facet* across the whole library, sorted.
+
+        Drawn from every track rather than the current view, so narrowing by
+        one facet never hides the other facets' remaining choices.
+        """
+        if facet not in _FACETS:
+            return []
+        values: set[str] = set()
+        for t in self._library:
+            if facet == 'decade':
+                v = _decade_of(str(t.get('year', '') or ''))
+            else:
+                v = str(t.get(facet, '') or '').strip()
+            if v:
+                values.add(v)
+        return sorted(values)
+
+    def toggle_filter(self, facet: str, value: str) -> None:
+        """Add/remove *value* from *facet*'s selected set."""
+        if facet not in _FACETS:
+            return
+        sel = self._filters.setdefault(facet, set())
+        sel.discard(value) if value in sel else sel.add(value)
+
+    def is_filtered(self, facet: str, value: str) -> bool:
+        return value in self._filters.get(facet, set())
+
+    def clear_filters(self) -> None:
+        self._filters = {}
+
+    @property
+    def active_filter_count(self) -> int:
+        return sum(len(v) for v in self._filters.values())
+
+    def _passes_filters(self, track: dict) -> bool:
+        """Whether *track* survives every selected facet (AND across facets,
+        OR within one -- two genres ticked means either genre passes)."""
+        for facet, values in self._filters.items():
+            if not values:
+                continue
+            if facet == 'decade':
+                v = _decade_of(str(track.get('year', '') or ''))
+            else:
+                v = str(track.get(facet, '') or '').strip()
+            if v not in values:
+                return False
+        return True
+
     def set_mode(self, mode: str) -> None:
-        if mode in ('library', 'playlists', 'favorites'):
+        if mode in ('library', 'playlists', 'favorites', 'recent'):
             self.mode = mode
             if (mode == 'playlists' and self._playlists
                     and self.active_playlist not in self._playlists.names()):
@@ -1033,27 +1180,54 @@ class MediaController:
         return self._playlists
 
     def view_indices(self) -> list[int]:
-        """Library indices in active-view order — the playback sequence."""
+        """Library indices in active-view order — the playback sequence.
+
+        Facet filters apply in **every** mode, so FILTER means one thing
+        wherever you are standing rather than "works here, silently ignored
+        there".  Sort is a *view* operation only: a playlist's stored running
+        order is never rewritten (that order is the owner's work), and the
+        recent list keeps its newest-first order unless a column was
+        explicitly asked for.
+        """
         if self.mode == 'playlists' and self._playlists and self.active_playlist:
             by_path = {str(t.get('path', '')): i
                        for i, t in enumerate(self._library)}
-            return [by_path[p] for p in
-                    self._playlists.tracks(self.active_playlist)
-                    if p in by_path]
-        if self.mode == 'favorites':
+            idx = [by_path[p] for p in
+                   self._playlists.tracks(self.active_playlist)
+                   if p in by_path]
+            idx = [i for i in idx if self._passes_filters(self._library[i])]
+        elif self.mode == 'favorites':
             # Explicit picks: crate excludes don't apply, sort still does.
             favs = self._playlists.favorites if self._playlists else set()
             idx = [i for i, t in enumerate(self._library)
-                   if str(t.get('path', '')) in favs]
+                   if str(t.get('path', '')) in favs
+                   and self._passes_filters(t)]
+        elif self.mode == 'recent':
+            # Newest first by nature; crate excludes don't apply (you *did*
+            # play it), facets still narrow it like everywhere else.
+            by_path = {str(t.get('path', '')): i
+                       for i, t in enumerate(self._library)}
+            recent = self._playlists.recent if self._playlists else []
+            idx = [by_path[p] for p in recent if p in by_path]
+            idx = [i for i in idx if self._passes_filters(self._library[i])]
         else:
             idx = [i for i, t in enumerate(self._library)
                    if not self._hidden(str(t.get('bucket', '') or ''))
                    and (self.bucket is None
                         or self._under(str(t.get('bucket', '') or ''),
-                                       self.bucket))]
+                                       self.bucket))
+                   and self._passes_filters(t)]
         if self._sort_key:
             def _key(i: int):
                 t = self._library[i]
+                if self._sort_key == 'length':
+                    try:
+                        return float(t.get('duration_s', 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        return 0.0
+                if self._sort_key == 'year':
+                    y = str(t.get('year', '') or '')
+                    return int(y) if y.isdigit() else 0
                 v = str(t.get(self._sort_key, '') or '')
                 return (v.lower() or '~', str(t.get('title', '')).lower())
             idx.sort(key=_key, reverse=not self._sort_asc)
@@ -1103,6 +1277,24 @@ class MediaController:
             return f'Media: delete failed ({exc})'
         self.rescan_library()
         return f'Media: deleted {Path(path).name}'
+
+    def track_info(self, index: int) -> dict:
+        """Everything the UI can say about library row *index* (hover card)."""
+        if not (0 <= index < len(self._library)):
+            return {}
+        t = self._library[index]
+        try:
+            dur = float(t.get('duration_s', 0.0) or 0.0)
+        except (TypeError, ValueError):
+            dur = 0.0
+        return {'title': str(t.get('title', '') or ''),
+                'artist': str(t.get('artist', '') or ''),
+                'album': str(t.get('album', '') or ''),
+                'genre': str(t.get('genre', '') or ''),
+                'year': str(t.get('year', '') or ''),
+                'duration_s': dur,
+                'bucket': str(t.get('bucket', '') or ''),
+                'path': str(t.get('path', '') or '')}
 
     def snapshot_path_at(self, index: int) -> str | None:
         """Absolute path of library row *index* (playlist membership)."""
@@ -1312,6 +1504,8 @@ class MediaController:
             'title': self._title,
             'artist': self._artist,
             'album': self._album,
+            'genre': self._genre,
+            'year': self._year,
             # Previous track (for banner "Previous:" line)
             'previous_track_id': '',
             'previous_title': self._previous_title,
@@ -1391,6 +1585,8 @@ class MediaController:
         self._title = str(track.get('title', path.stem) or path.stem)
         self._artist = str(track.get('artist', '') or '')
         self._album = str(track.get('album', '') or '')
+        self._genre = str(track.get('genre', '') or '')
+        self._year = str(track.get('year', '') or '')
         self._duration_s = float(track.get('duration_s', 0.0) or 0.0)
         self._position_s = 0.0
         self._track_id = f'media:{path.name}'
@@ -1406,6 +1602,12 @@ class MediaController:
         self._end_handled = False
         self._is_playing = True
         self._status = 'playing'
+
+        if self._playlists is not None:
+            try:                           # recently-played, newest first
+                self._playlists.note_played(str(path))
+            except Exception:
+                pass
 
         log.info(
             'media-01: playing [%d/%d] %s — %s',

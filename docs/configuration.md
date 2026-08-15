@@ -2,7 +2,7 @@
 
 Owner: Drop-in Maintainers
 Status: active
-Last updated: 2026-07-07
+Last updated: 2026-08-15
 
 Keys live under `[media]` in `config.toml`, which already ships a
 commented-out `[media]` block — uncomment and adjust to enable the drop-in
@@ -22,15 +22,16 @@ flagged at startup.
 | `now_playing_banner` | bool | `true` | Show the track-change overlay banner (same as Spotify's) |
 | `now_playing_banner_hold_s` | float | `10.0` | Seconds the banner stays visible, floor `1.0` |
 | `now_playing_banner_delay_s` | float | `2.0` | Delay after a track starts before the banner fires, floor `0.0` |
-| `crossfade_ms` | int | `0` | **Reserved, not yet implemented** — parsed and clamped to `>= 0` but has no playback effect yet (see [operations.md](operations.md) TODO) |
+| `crossfade_ms` | int | `3000` | Length of the overlapping crossfade between tracks (VLC backend; real since 0.12.0). The `crossfade` bool (default `true`) toggles it; the Deck window has a checkbox for both |
 
 ## Supported audio formats
 
 Scanned by extension: `.mp3 .flac .ogg .oga .opus .wav .aiff .aif .m4a .aac
-.wma .ape .mpc .wv`. Tags (title/artist/album/duration) are read via
-`mutagen` when available; if `mutagen` is missing or a file has no tags, the
-filename stem is used as the title and artist/album are left blank — this
-is a soft fallback, not a startup error.
+.wma .ape .mpc .wv`. Tags (title/artist/album/genre/year/duration) are read
+via `mutagen` when available; if `mutagen` is missing or a file has no tags,
+the filename stem is used as the title and the other fields are left blank —
+this is a soft fallback, not a startup error. Genre and year feed the Media
+Deck's facet filters (decade derives from year) and the row hover cards.
 
 ## Example
 

@@ -2,7 +2,7 @@
 
 Owner: Drop-in Maintainers
 Status: active
-Last updated: 2026-07-07
+Last updated: 2026-08-15
 
 ## Purpose
 
@@ -39,6 +39,37 @@ operator gets local-file playback with zero UI changes.
   3 seconds into it.
 - `Ctrl+Alt+Shift+M` — toggle shuffle (affects future advances, does not
   reshuffle the currently-playing order retroactively).
+- `Shift+L` — the **Media Deck** window (see below); Esc-Esc closes it.
+
+## The Media Deck browser (0.24.0)
+
+The deck's library pane has four tabs — **LIBRARY** (accordion crates, one
+per subfolder, each with an exclude toggle), **PLAYLISTS**, **♥ FAVS**, and
+**RECENT** (the last 50 tracks that actually played, newest first,
+persisted).  Two icons sit at the right of the tab row:
+
+- `↑↓` **sort** — artist / title / album / year / length / scan order.
+  Sort is a *view* operation: a playlist's stored running order is never
+  rewritten.
+- `≡` **facet filters** — artist / album / genre / decade, checkbox values
+  drawn from the whole library.  AND across facets, OR within one, applied
+  in every view (playback follows what they leave visible).  The header
+  reports the narrowing (`30 tracks · 2:03 · 1 filter`); `clear` in the
+  panel drops the lot.
+
+The playlist picker rows carry count + running time and a `!n` badge when
+entries point at files that no longer exist; right-clicking a row offers
+**Rename…** (order-preserving, collisions refused), **Duplicate**,
+**Prune n missing**, and an armed **Delete**.  Hovering nearly anything —
+rows, transport, tabs, crates — raises a tooltip through the core tooltip
+system; a row's tooltip is its full tag card (artist / album / genre / year /
+length / crate).
+
+While music plays, the platter is fed by the app's own audio analyzer: the
+glow breathes with bass, a rim ring flashes on the beat, treble drives the
+sparkles, and a radial spectrum ring orbits the record.  Levels are captured
+only while the deck window is open; on a core without audio levels the
+platter falls back to its old purely time-driven look.
 
 ## Now-playing display priority
 

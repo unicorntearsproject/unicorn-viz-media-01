@@ -3,7 +3,8 @@
 Ordered ``name -> [track paths]`` playlists (same functionality as the DJ
 mixer's *sets*, media-player naming), plus the library's persisted view
 preferences: the set of **excluded crates** (top-level subfolders hidden from
-the library and playback) and the last open crate.  One JSON file
+the library and playback), the last open crate, hearted favorites, and the
+**recently-played history** (newest first, capped).  One JSON file
 (``runtime/media_playlists.json``), atomic writes, corrupt/missing files load
 as empty — never an error.
 """
@@ -31,6 +32,7 @@ class MediaPlaylists:
         self.last_bucket: str | None = None  # last open crate (None = ALL)
         self.prefs: dict = {}                # repeat/shuffle/volume/mode/...
         self.favorites: set[str] = set()     # favorited track paths
+        self.recent: list[str] = []          # recently-played paths, newest first
         self._load()
 
     # -- playlists -------------------------------------------------------------
@@ -69,6 +71,35 @@ class MediaPlaylists:
             tracks.pop(index)
             self.save()
 
+    def index_of(self, name: str, path: str) -> int:
+        """Stored position of *path* in the playlist, or -1.  Paths are unique
+        within a list (:meth:`add` dedupes), so this is unambiguous."""
+        try:
+            return (self._lists.get(name) or []).index(str(path))
+        except ValueError:
+            return -1
+
+    def remove_path(self, name: str, path: str) -> bool:
+        """Remove *path* from the playlist.  Returns whether it was there.
+
+        The identity-based counterpart to :meth:`remove`.  Callers driven by a
+        *displayed* row must use this one: the view can be sorted or filtered,
+        so its row numbers are not the stored ones, and removing by row would
+        delete a different track than the one right-clicked.
+        """
+        i = self.index_of(name, path)
+        if i < 0:
+            return False
+        self.remove(name, i)
+        return True
+
+    def move_path(self, name: str, path: str, delta: int) -> int:
+        """Move *path* by *delta* rows in the stored order; -1 if absent."""
+        i = self.index_of(name, path)
+        if i < 0:
+            return -1
+        return self.move(name, i, delta)
+
     def move(self, name: str, index: int, delta: int) -> int:
         tracks = self._lists.get(name)
         if not tracks or not (0 <= index < len(tracks)):
@@ -82,6 +113,87 @@ class MediaPlaylists:
     def delete(self, name: str) -> None:
         if self._lists.pop(name, None) is not None:
             self.save()
+
+    def rename(self, old: str, new: str) -> bool:
+        """Rename a playlist, keeping its position in the picker.
+
+        Order matters -- the picker lists playlists in creation order, and a
+        rename that sent one to the bottom would read as "it moved", so the
+        dict is rebuilt in place rather than popped and re-added.  Refuses a
+        blank name or one already taken; a silent overwrite would merge two
+        playlists into one.
+        """
+        new = str(new or '').strip()
+        if not new or old not in self._lists or new == old:
+            return False
+        if new in self._lists:
+            return False
+        self._lists = {(new if k == old else k): v
+                       for k, v in self._lists.items()}
+        self.save()
+        return True
+
+    def duplicate(self, name: str) -> str | None:
+        """Copy a playlist under a free ``name (2)``-style name.
+
+        Useful before a heavy edit: fork the list, cut it about, and the
+        original is still there if the new shape does not work.
+        """
+        if name not in self._lists:
+            return None
+        n = 2
+        while f'{name} ({n})' in self._lists:
+            n += 1
+        copy = f'{name} ({n})'
+        self._lists[copy] = list(self._lists[name])
+        self.save()
+        return copy
+
+    def missing(self, name: str) -> list[str]:
+        """The paths in playlist *name* whose file no longer exists.
+
+        A playlist holds paths, not tracks, so nothing notices when the file
+        behind one is moved or deleted -- the row just stops loading.
+        """
+        out = []
+        for p in self._lists.get(name, []):
+            try:
+                if not Path(p).is_file():
+                    out.append(p)
+            except OSError:
+                out.append(p)
+        return out
+
+    def prune_missing(self, name: str) -> int:
+        """Drop every dead path from playlist *name*; returns how many went.
+
+        Only ever removes entries whose file is gone, so a playlist of real
+        tracks is untouched.
+        """
+        tracks = self._lists.get(name)
+        if not tracks:
+            return 0
+        dead = set(self.missing(name))
+        if not dead:
+            return 0
+        self._lists[name] = [p for p in tracks if p not in dead]
+        self.save()
+        return len(dead)
+
+    # -- recently played --------------------------------------------------------
+
+    _RECENT_CAP = 50
+
+    def note_played(self, path: str) -> None:
+        """Record *path* as most recently played (deduped, capped)."""
+        p = str(path)
+        if not p:
+            return
+        if self.recent and self.recent[0] == p:
+            return                          # already the freshest: no churn
+        self.recent = [p] + [r for r in self.recent if r != p]
+        del self.recent[self._RECENT_CAP:]
+        self.save()
 
     # -- library preferences ----------------------------------------------------
 
@@ -127,6 +239,7 @@ class MediaPlaylists:
             self.last_bucket = str(lb) if lb else None
             self.prefs = dict(data.get('prefs') or {})
             self.favorites = {str(f) for f in (data.get('favorites') or [])}
+            self.recent = [str(r) for r in (data.get('recent') or [])]
             log.info('media playlists: %d list(s), %d crate(s) excluded',
                      len(self._lists), len(self.excluded))
         except Exception as exc:
@@ -138,7 +251,8 @@ class MediaPlaylists:
                    'excluded': sorted(self.excluded),
                    'last_bucket': self.last_bucket,
                    'prefs': dict(self.prefs),
-                   'favorites': sorted(self.favorites)}
+                   'favorites': sorted(self.favorites),
+                   'recent': list(self.recent)}
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(dir=str(self._path.parent),
