@@ -246,8 +246,28 @@ class MediaPlaylists:
             log.warning('media playlists: load failed (%s): %s', self._path, exc)
 
     def save(self) -> bool:
+        # 2026-09-01: merge in any playlist an external process (a tuning
+        # tool, another drop-in) added on disk since this instance's own
+        # _load() -- otherwise a routine internal save unrelated to
+        # playlists (note_played() fires on every track change) clobbers
+        # them wholesale, since this object's in-memory _lists snapshot is
+        # only ever as fresh as app startup. Own in-memory entries always
+        # win for names both sides know about (this process's own
+        # create/add/remove/delete/rename calls are authoritative for
+        # those); only names foreign to this session are pulled in.
+        lists = dict(self._lists)
+        try:
+            if self._path.exists():
+                on_disk_playlists = (
+                    json.loads(self._path.read_text(encoding='utf-8')).get('playlists') or {}
+                )
+                for name, tracks in on_disk_playlists.items():
+                    if name not in lists and isinstance(tracks, list):
+                        lists[name] = [str(p) for p in tracks]
+        except Exception as exc:
+            log.debug('media playlists: pre-save merge skipped (%s): %s', self._path, exc)
         payload = {'_meta': {'schema': SCHEMA, 'schema_version': SCHEMA_VERSION},
-                   'playlists': self._lists,
+                   'playlists': lists,
                    'excluded': sorted(self.excluded),
                    'last_bucket': self.last_bucket,
                    'prefs': dict(self.prefs),

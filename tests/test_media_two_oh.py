@@ -74,6 +74,49 @@ def test_note_played_dedupes_caps_and_persists(tmp_path) -> None:
     assert again.recent == s.recent          # survives a restart
 
 
+def test_save_preserves_externally_added_playlists(tmp_path) -> None:
+    """2026-09-01: a live instance's routine internal save (note_played()
+    fires on every track change during plain playback, no playlist edit
+    involved) must not clobber a playlist another process wrote to the
+    same file after this instance's own _load() -- only this instance's
+    own known list names are authoritative; foreign names on disk get
+    merged in rather than dropped."""
+    s = _store(tmp_path)
+    s.create('Mine')
+    s.add('Mine', ['/a.mp3'])           # persists 'Mine' to disk
+
+    # external process (e.g. a tuning tool editing the JSON directly)
+    # adds a new list this instance never loaded
+    on_disk = json.loads((tmp_path / 'pl.json').read_text())
+    on_disk['playlists']['training - added externally'] = ['/e1.mp3', '/e2.mp3']
+    (tmp_path / 'pl.json').write_text(json.dumps(on_disk))
+
+    s.note_played('/a.mp3')             # unrelated bookkeeping save
+
+    again = _pl.MediaPlaylists(tmp_path / 'pl.json')
+    assert again.tracks('Mine') == ['/a.mp3']                        # own list intact
+    assert again.tracks('training - added externally') == ['/e1.mp3', '/e2.mp3']  # not clobbered
+
+
+def test_save_own_edits_win_over_stale_disk_for_known_names(tmp_path) -> None:
+    """The merge only rescues names this instance never knew about --
+    for a name both sides know, this instance's own in-memory edits are
+    authoritative (an external rewrite of a list this session is actively
+    editing should not silently win)."""
+    s = _store(tmp_path)
+    s.create('Shared')
+    s.add('Shared', ['/a.mp3'])
+
+    on_disk = json.loads((tmp_path / 'pl.json').read_text())
+    on_disk['playlists']['Shared'] = ['/stale.mp3']
+    (tmp_path / 'pl.json').write_text(json.dumps(on_disk))
+
+    s.add('Shared', ['/b.mp3'])         # this instance's own mutation + save
+
+    again = _pl.MediaPlaylists(tmp_path / 'pl.json')
+    assert again.tracks('Shared') == ['/a.mp3', '/b.mp3']
+
+
 def test_prune_missing_removes_only_dead_paths(tmp_path) -> None:
     live = tmp_path / 'real.mp3'
     live.write_bytes(b'x')

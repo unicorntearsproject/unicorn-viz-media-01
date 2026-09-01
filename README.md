@@ -1,9 +1,9 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.24.0
+Version: 0.24.1
 Status: beta
-Last updated: 2026-08-15
+Last updated: 2026-09-01
 
 `media-01` is a local audio playback subsystem for unicorn-viz.  It scans a
 directory of audio files, reads ID3/Vorbis/FLAC tags via `mutagen`, and plays
@@ -91,6 +91,13 @@ Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
 
+- **0.24.1** — Fixed a routine internal `save()` (fired on every track
+  change via `note_played()`'s recent-history bookkeeping, nothing to
+  do with editing playlists) silently overwriting playlist entries an
+  external process had added to the same file since this instance's
+  own load. `save()` now merges in any playlist name foreign to this
+  session from the on-disk file rather than blindly overwriting; this
+  instance's own edits still win for names it already knows about.
 - **0.24.0** — **The Media Player 2.0 treatment: the library grows up, and
   the deck starts hearing the room.**  Everything here is the mixer browser's
   UX ported across, minus the DJ-only parts (no BPM, no keys, no stems).
