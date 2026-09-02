@@ -191,6 +191,13 @@ class MediaDeckWindow:
         self._search_focused = False
         self._rows_visible = 10
         self._scroll = 0                  # stable list scroll (no recentering)
+        # Folder pane (top third of the browser).  The accordion it replaced
+        # grew with the tree and, on a 10k library, left room for about two
+        # track rows -- so the folders crowded out the thing they select.
+        # Fixed split + own scroll keeps the track list a usable size no
+        # matter how deep the crates go.  Mirrors the DJ mixer's split pane.
+        self._folder_scroll = 0
+        self._folder_rect: tuple[int, int, int, int] | None = None
         self._close_confirm_deadline = 0.0
         self._menu: dict | None = None      # right-click context menu
         self._menu_rects: list = []
@@ -342,7 +349,13 @@ class MediaDeckWindow:
                          bool(event.key.repeat))
             return
         if event.type == sdl2.SDL_MOUSEWHEEL:
-            self._move_sel(-int(event.wheel.y) or 1)
+            step = -int(event.wheel.y) or 1
+            fr = self._folder_rect
+            mx, my = self._mouse_xy
+            if fr is not None and fr[0] <= mx <= fr[2] and fr[1] <= my <= fr[3]:
+                self._folder_scroll = max(0, self._folder_scroll + step)
+            else:
+                self._move_sel(step)
             return
         if event.type == sdl2.SDL_MOUSEMOTION:
             # Tracked purely for the hover highlight; the render thread reads
@@ -530,6 +543,8 @@ class MediaDeckWindow:
                 self._c.active_playlist = payload
                 self._pl_open = False
                 self._sel = 0
+                if hasattr(self._c, 'bag_reset'):
+                    self._c.bag_reset()   # a different list is a new pass
             elif action == 'pl_new':
                 pls = getattr(self._c, 'playlists', None)
                 if pls is not None:
@@ -673,6 +688,22 @@ class MediaDeckWindow:
             self._tag_edit_save()
         elif action == 'tag_cancel':
             self._tag_edit = None
+
+    @staticmethod
+    def _folder_split(list_top: int, list_bot: int,
+                      row_h: int) -> tuple[int, int]:
+        """Split the browser pane: folders on top, tracks below.
+
+        Returns ``(folder_bot, folder_rows_visible)``.  The folder pane takes
+        a *fixed* third of the pane rather than growing with the crate tree,
+        which is the whole point: the accordion this replaced expanded until
+        a deep library left room for about two track rows.  Floored at two
+        folder rows so the pane never vanishes on a short window.
+        """
+        avail = max(0, list_bot - list_top)
+        folder_bot = list_top + max(row_h * 2, avail // 3)
+        folder_bot = min(folder_bot, list_bot)
+        return folder_bot, max(1, (folder_bot - list_top) // row_h)
 
     def _draw_tag_editor(self, d, w, h) -> list:
         """The tag-edit modal; returns its click rects."""
@@ -1276,16 +1307,33 @@ class MediaDeckWindow:
         # Accordion crates: nested tree along the open path (depth-tinted).
         buckets = (self._c.buckets()
                    if mode == 'library' and hasattr(self._c, 'buckets') else [])
+        self._folder_rect = None
         if len(buckets) > 1:
             hh = 18
             open_b = getattr(self._c, 'bucket', None)
             depth_fill = ((16, 20, 34, 255), (19, 23, 42, 255),
                           (23, 24, 50, 255), (27, 24, 56, 255),
                           (31, 25, 62, 255), (35, 26, 68, 255))
-            hy = list_top
-            for bkey, blabel, bcount, excluded, depth in buckets:
-                if hy + hh > list_bot - 40:      # keep room for some rows
+            folder_bot, fvis = self._folder_split(list_top, list_bot, hh)
+            self._folder_scroll = max(
+                0, min(max(0, len(buckets) - fvis), self._folder_scroll))
+            # Keep the open crate on screen when it changes under us.
+            for i, b in enumerate(buckets):
+                if b[0] == open_b:
+                    if i < self._folder_scroll:
+                        self._folder_scroll = i
+                    elif i >= self._folder_scroll + fvis:
+                        self._folder_scroll = i - fvis + 1
                     break
+            self._folder_rect = (rx0, list_top, rx1, folder_bot)
+            shown = buckets[self._folder_scroll:self._folder_scroll + fvis]
+            if len(buckets) > fvis:              # scroll affordance
+                d.text((rx1 - 30, list_top - 11),
+                       f'{self._folder_scroll + 1}-'
+                       f'{self._folder_scroll + len(shown)}/{len(buckets)}',
+                       font=self._font_s, fill=_FAINT)
+            hy = list_top
+            for bkey, blabel, bcount, excluded, depth in shown:
                 is_open = bkey == open_b or (bkey is None and open_b is None)
                 indent = 10 * depth
                 if is_open:
@@ -1298,8 +1346,12 @@ class MediaDeckWindow:
                 on_chain = (bkey is not None and open_b is not None
                             and (open_b == bkey
                                  or open_b.startswith(bkey + '/')))
+                # Empty crates read dimmer than merely-unselected ones, so
+                # 'nothing in here' is legible before you click it.
+                empty = not excluded and not bcount
                 lcol = (_WARN if excluded else
-                        (_TEXT if (is_open or on_chain) else _DIM))
+                        (_TEXT if (is_open or on_chain)
+                         else (_FAINT if empty else _DIM)))
                 tag = '× ' if excluded else ''
                 arrow = '▼' if (is_open or on_chain) else '►'
                 d.text((rx0 + 6 + indent, hy + 3),
@@ -1321,7 +1373,51 @@ class MediaDeckWindow:
                               'and playback' if not excluded else
                               'Excluded.  Click to bring this crate back.')
                 hy += hh
-            list_top = hy + 2
+            list_top = folder_bot + 4        # fixed split, not tree-dependent
+        elif mode == 'playlists':
+            # Same split for playlists: the list of lists on top, the tracks
+            # of the selected one below, so switching lists is a click in
+            # view rather than a trip through a dropdown.
+            pl_store = getattr(self._c, 'playlists', None)
+            names = list(pl_store.names()) if pl_store is not None else []
+            if names:
+                hh = 18
+                cur = getattr(self._c, 'active_playlist', None)
+                folder_bot, fvis = self._folder_split(list_top, list_bot, hh)
+                self._folder_scroll = max(
+                    0, min(max(0, len(names) - fvis), self._folder_scroll))
+                if cur in names:             # keep the active list on screen
+                    i = names.index(cur)
+                    if i < self._folder_scroll:
+                        self._folder_scroll = i
+                    elif i >= self._folder_scroll + fvis:
+                        self._folder_scroll = i - fvis + 1
+                self._folder_rect = (rx0, list_top, rx1, folder_bot)
+                shown = names[self._folder_scroll:self._folder_scroll + fvis]
+                if len(names) > fvis:
+                    d.text((rx1 - 30, list_top - 11),
+                           f'{self._folder_scroll + 1}-'
+                           f'{self._folder_scroll + len(shown)}/{len(names)}',
+                           font=self._font_s, fill=_FAINT)
+                hy = list_top
+                for nm in shown:
+                    active = nm == cur
+                    try:
+                        n = len(pl_store.tracks(nm))
+                    except Exception:
+                        n = 0
+                    d.rectangle([rx0, hy, rx1, hy + hh - 2],
+                                fill=(0, 45, 90, 255) if active
+                                else (19, 23, 42, 255),
+                                outline=_EDGE if active
+                                else (40, 52, 78, 255))
+                    d.text((rx0 + 8, hy + 3), f'{nm[:18]} ({n})',
+                           font=self._font_s,
+                           fill=_TEXT if active else (_FAINT if not n else _DIM))
+                    regions.append((rx0, hy, rx1, hy + hh - 2,
+                                    'pl_select', nm))
+                    hy += hh
+                list_top = folder_bot + 4
         # Rows.
         view = self._view()
         self._sel = min(self._sel, max(0, len(view) - 1))

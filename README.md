@@ -1,7 +1,7 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.24.2
+Version: 0.25.0
 Status: beta
 Last updated: 2026-09-01
 
@@ -90,6 +90,16 @@ media-01 is paused/stopped, the Spotify track (if playing) takes the band.
 Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
+
+- **0.25.0** — **Split browser pane, replacing the accordion.** Folders
+  take a fixed top third with their own scroll; tracks keep the bottom two
+  thirds no matter how deep the crate tree goes. The accordion grew a row
+  per crate along the open path, so a large library left room for about two
+  track rows. The selected crate is background-highlighted and empty crates
+  read dimmer than merely-unselected ones. Playlists get the same treatment:
+  the list of lists sits in that top pane, so switching lists is a click in
+  view instead of a trip through a dropdown. The mouse wheel scrolls
+  whichever pane the cursor is over.
 
 - **0.24.2** — Shuffle now covers the whole list: a pass ends when every
   track has been *played*, not when playback happens to reach the last
