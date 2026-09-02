@@ -84,6 +84,35 @@ def read_tags(path: str | Path) -> dict[str, str]:
     return out
 
 
+def read_bpm(path: str | Path) -> float:
+    """The file's authored BPM tag (ID3 TBPM / Vorbis 'bpm'), or 0.0.
+
+    2026-09-03 (v3 phase 4): a tagged local file is ground truth the
+    detector cannot recover from audio alone for half-time material
+    (notated 82 vs sounding 164), so media-01 publishes it on the
+    vj_api BPM bus and auto-vj primes the tracker with it -- the same
+    one-way channel dj-mixer-01's own analysis already uses. Values
+    outside 40..300 read as 0.0 (absent).
+    """
+    if not _MUTAGEN_OK:
+        return 0.0
+    p = Path(path)
+    if p.suffix.lower() in _UNTAGGABLE:
+        return 0.0
+    try:
+        f = mutagen.File(str(p), easy=True)
+        if f is None:
+            return 0.0
+        val = f.get('bpm')
+        if not val:
+            return 0.0
+        bpm = float(str(val[0]).strip())
+    except Exception as exc:
+        log.debug('media-01: bpm tag read failed for %s: %s', p, exc)
+        return 0.0
+    return bpm if 40.0 <= bpm <= 300.0 else 0.0
+
+
 def write_tags(path: str | Path, fields: dict[str, str]) -> tuple[bool, str]:
     """Write *fields* into the file's metadata.  Returns ``(ok, message)``.
 

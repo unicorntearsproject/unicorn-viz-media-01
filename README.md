@@ -1,7 +1,7 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.25.0
+Version: 0.26.0
 Status: beta
 Last updated: 2026-09-01
 
@@ -91,6 +91,12 @@ Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
 
+- **0.26.0** — Publishes the playing track's authored BPM tag (ID3 TBPM /
+  Vorbis `bpm`) on the vj_api BPM bus as source `media`, read once per
+  track and republished every frame while playing. Auto VJ primes its
+  tracker from that bus the way it already does from the mixer's
+  analysis, which settles the half-time-vs-double-time ambiguity audio
+  evidence cannot (v3 phase 4). Untagged files publish nothing.
 - **0.25.0** — **Split browser pane, replacing the accordion.** Folders
   take a fixed top third with their own scroll; tracks keep the bottom two
   thirds no matter how deep the crate tree goes. The accordion grew a row

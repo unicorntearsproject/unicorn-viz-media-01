@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.25.0'
+__version__ = '0.26.0'
 
 import json
 import logging
@@ -604,6 +604,8 @@ class MediaController:
         self._now_playing_banner_delay_s: float = max(
             0.0, float(self._cfg.get('now_playing_banner_delay_s', 2.0) or 2.0)
         )
+        self._tag_bpm_path: str = ''          # v3 phase 4: authored-BPM publish cache
+        self._tag_bpm: float = 0.0
         # TODO(future): cross-fade + auto-mixing: duration of the overlap ramp.
         # Wired into config now; backend support to be added in a later iteration.
         self._crossfade_ms: int = max(0, int(self._cfg.get('crossfade_ms', 0) or 0))
@@ -1062,6 +1064,7 @@ class MediaController:
             self.close_window()          # window self-closed (Esc Esc)
 
         self._publish_track_path()
+        self._publish_track_bpm()
 
     def _capture_audio_levels(self, audio: Any) -> None:
         """Mirror the app's live audio analysis for the Media Deck's chrome.
@@ -1116,6 +1119,54 @@ class MediaController:
                 publish('media', path)
             except Exception as exc:       # pragma: no cover - defensive
                 log.debug('media-01: track-path publish failed: %s', exc)
+
+    def _tags_module(self) -> Any:
+        """Lazily load the sibling tags.py by path (same pattern as the
+        playlists store -- this drop-in is loaded by file, not as a package)."""
+        mod = getattr(self, '_tags_mod', None)
+        if mod is None:
+            import importlib.util as _ilu
+            _tp = Path(__file__).resolve().parent / 'tags.py'
+            _spec = _ilu.spec_from_file_location('media_tags', _tp)
+            assert _spec is not None and _spec.loader is not None
+            mod = _ilu.module_from_spec(_spec)
+            _spec.loader.exec_module(mod)
+            self._tags_mod = mod
+        return mod
+
+    def _publish_track_bpm(self) -> None:
+        """Publish the playing track's authored BPM tag on the vj_api BPM bus.
+
+        2026-09-03 (v3 phase 4): auto-vj primes its tracker from this bus
+        (source != 'auto_vj'), the way it already does from dj-mixer-01's
+        analysis. A tagged local file settles the half-time-vs-double-time
+        ambiguity that audio evidence cannot (three signals across two
+        bands measured without leverage -- see docs/adr/vj-system.md).
+        Untagged files publish nothing. The tag is read once per track
+        (cached by path) and republished every frame while playing, since
+        the bus hint expires after a few seconds.
+        """
+        if not self._is_playing:
+            return
+        path = self.snapshot_path_at(self._index)
+        if not path:
+            return
+        if path != self._tag_bpm_path:
+            self._tag_bpm_path = path
+            try:
+                self._tag_bpm = float(self._tags_module().read_bpm(path))
+            except Exception as exc:           # pragma: no cover - defensive
+                log.debug('media-01: bpm tag read failed: %s', exc)
+                self._tag_bpm = 0.0
+        if self._tag_bpm <= 0.0:
+            return
+        vj = getattr(self._app, 'vj_api', None)
+        publish = getattr(vj, 'publish_bpm', None)
+        if callable(publish):
+            try:
+                publish('media', self._tag_bpm)
+            except Exception as exc:       # pragma: no cover - defensive
+                log.debug('media-01: bpm publish failed: %s', exc)
 
     def handle_key(self, sym: int, mod: int) -> str | None | bool:
         """Handle media hotkeys.
