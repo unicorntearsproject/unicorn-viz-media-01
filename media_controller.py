@@ -19,14 +19,16 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.24.1'
+__version__ = '0.24.2'
 
+import json
 import logging
 import os
 import shutil
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -129,23 +131,121 @@ def _read_tags(path: Path) -> dict[str, Any]:
 # instead of stalling boot after it.  Mirrors ImageShowcase's prefetch cache.
 _LIBRARY_SCAN_CACHE: dict[str, list[dict[str, Any]]] = {}
 _LIBRARY_SCAN_LOCK = threading.Lock()
+# In-flight prescans, keyed like the cache.  rescan_library() WAITS on these
+# rather than racing them: a non-blocking miss used to send the main thread
+# off to walk the same 10.7k files the prescan thread was already walking,
+# so the library was scanned twice at once and the two contended for disk
+# (2026-09-02).  Waiting is strictly faster than duplicating the work.
+_LIBRARY_SCAN_PENDING: dict[str, threading.Event] = {}
+
+
+_CACHE_VERSION = 1
+_TAG_WORKERS = 8
+
+
+def _cache_path() -> Path:
+    """Where the tag cache lives (beside the playlists store)."""
+    return (Path(__file__).resolve().parents[2] / 'runtime'
+            / 'media_library_cache.json')
+
+
+def _load_tag_cache() -> dict[str, dict[str, Any]]:
+    """Read the persisted tag cache: {path: {size, mtime, **tags}}.
+
+    A miss of any kind is not an error -- the scan simply re-reads tags.
+    """
+    try:
+        raw = json.loads(_cache_path().read_text(encoding='utf-8'))
+        if int(raw.get('version', 0)) != _CACHE_VERSION:
+            return {}
+        return dict(raw.get('entries') or {})
+    except Exception:
+        return {}
+
+
+def _save_tag_cache(entries: dict[str, dict[str, Any]]) -> None:
+    """Persist the tag cache, atomically.  Best-effort: a failure here only
+    costs the next start its speed, never correctness."""
+    try:
+        path = _cache_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix('.json.tmp')
+        tmp.write_text(json.dumps({'version': _CACHE_VERSION,
+                                   'entries': entries}),
+                       encoding='utf-8')
+        tmp.replace(path)
+    except Exception as exc:
+        log.debug('media-01: tag cache not saved: %s', exc)
 
 
 def _scan_library(directory: Path) -> list[dict[str, Any]]:
-    """Walk *directory* and return a list of track metadata dicts."""
-    tracks: list[dict[str, Any]] = []
+    """Walk *directory* and return a list of track metadata dicts.
+
+    Tag reads dominate this scan (a 10.7k-track library spent ~15s in
+    mutagen), so results are cached on disk keyed by path + size + mtime.
+    A warm start then costs one ``stat`` per file instead of one tag parse,
+    and only genuinely new or edited files are re-read -- those in parallel,
+    since the work is I/O-bound.  Correctness never depends on the cache:
+    any miss, staleness or read failure just falls back to reading tags.
+    """
+    cache = _load_tag_cache()
+    fresh: dict[str, dict[str, Any]] = {}
+    found: list[tuple[Path, str, int, float]] = []
     try:
         for root, _dirs, files in os.walk(directory):
             for name in sorted(files):
                 p = Path(root) / name
-                if p.suffix.lower() in _AUDIO_EXTS:
-                    meta = _read_tags(p)
-                    tracks.append({
-                        'path': p,
-                        **meta,
-                    })
+                if p.suffix.lower() not in _AUDIO_EXTS:
+                    continue
+                try:
+                    st = p.stat()
+                except OSError:
+                    continue
+                found.append((p, str(p), int(st.st_size), float(st.st_mtime)))
     except Exception as exc:
         log.warning('media-01: library scan error: %s', exc)
+        return []
+
+    stale: list[tuple[Path, str, int, float]] = []
+    hits = 0
+    for item in found:
+        _p, key, size, mtime = item
+        ent = cache.get(key)
+        if (ent is not None and int(ent.get('size', -1)) == size
+                and abs(float(ent.get('mtime', -1.0)) - mtime) < 1e-6):
+            fresh[key] = ent
+            hits += 1
+        else:
+            stale.append(item)
+
+    if stale:
+        def _one(item: tuple[Path, str, int, float]) -> tuple[str, dict[str, Any]]:
+            p, key, size, mtime = item
+            meta = dict(_read_tags(p))
+            meta['size'] = size
+            meta['mtime'] = mtime
+            return key, meta
+
+        try:
+            with ThreadPoolExecutor(max_workers=_TAG_WORKERS) as pool:
+                for key, meta in pool.map(_one, stale):
+                    fresh[key] = meta
+        except Exception as exc:      # pool unavailable: plain sequential read
+            log.debug('media-01: parallel tag read unavailable (%s)', exc)
+            for item in stale:
+                key, meta = _one(item)
+                fresh[key] = meta
+
+    tracks: list[dict[str, Any]] = []
+    for p, key, _size, _mtime in found:
+        meta = {k: v for k, v in fresh.get(key, {}).items()
+                if k not in ('size', 'mtime')}
+        tracks.append({'path': p, **meta})
+
+    log.info('media-01: scan %d track(s) — %d cached, %d read',
+             len(tracks), hits, len(stale))
+    if stale or len(fresh) != len(cache):
+        _save_tag_cache(fresh)
     return tracks
 
 
@@ -454,14 +554,22 @@ class MediaController:
         media_dir = cls._resolve_media_dir(cfg)
         key = str(media_dir.resolve()) if media_dir.exists() else str(media_dir)
         with _LIBRARY_SCAN_LOCK:
-            if key in _LIBRARY_SCAN_CACHE:
+            if key in _LIBRARY_SCAN_CACHE or key in _LIBRARY_SCAN_PENDING:
                 return
+            done = threading.Event()
+            _LIBRARY_SCAN_PENDING[key] = done
 
         def _scan() -> None:
-            tracks = _scan_library(media_dir)
-            with _LIBRARY_SCAN_LOCK:
-                _LIBRARY_SCAN_CACHE.setdefault(key, tracks)
-            log.info('media-01: prescanned %d track(s) from %s', len(tracks), media_dir)
+            try:
+                tracks = _scan_library(media_dir)
+                with _LIBRARY_SCAN_LOCK:
+                    _LIBRARY_SCAN_CACHE.setdefault(key, tracks)
+                log.info('media-01: prescanned %d track(s) from %s',
+                         len(tracks), media_dir)
+            finally:
+                # Always signal, even on failure, so a waiting constructor
+                # falls through to its own scan instead of hanging.
+                done.set()
 
         threading.Thread(target=_scan, daemon=True, name='media-prescan').start()
 
@@ -616,6 +724,13 @@ class MediaController:
         # ALL and ONE remain one button-press away.
         self.repeat = rep if rep in ('all', 'one', 'off') else 'off'
         self._set_over = False     # latched; see _note_set_over()
+        # Shuffle bag: library indices played since the last view change.
+        # 'The set is over' means every track in the view has been PLAYED,
+        # not that playback reached the view's last *row* -- those differ the
+        # moment you start anywhere but row 0, which is the normal case under
+        # shuffle (fixed 2026-09-02; the old check stopped a 10k library after
+        # a handful of tracks).  See _view_exhausted() / _next_unplayed().
+        self._played: set[int] = set()
         # Crossfade between tracks (VLC backend: true overlapping fade).
         self.crossfade_enabled = bool(self._cfg.get('crossfade', True))
         self._crossfade_s = max(0.5, float(
@@ -769,6 +884,7 @@ class MediaController:
     def toggle_shuffle(self) -> str:
         """Toggle shuffle mode (takes effect on next track advance)."""
         self._shuffle = not self._shuffle
+        self.bag_reset()   # 'played' means something different in each mode
         return f'Media: shuffle {"ON" if self._shuffle else "OFF"}'
 
     def set_volume(self, volume: int) -> None:
@@ -915,8 +1031,7 @@ class MediaController:
                     self._start_track(self._index)
                 else:
                     view = self.view_indices()
-                    at_end = bool(view) and self._index == view[-1]
-                    if not (self.repeat == 'off' and at_end):
+                    if not (self.repeat == 'off' and self._pass_complete(view)):
                         self._advance(1)
         elif self._status == 'playing' and self._backend.is_ended():
             # Track finished — auto-advance within the active view, honouring
@@ -926,8 +1041,7 @@ class MediaController:
                     self._start_track(self._index)
                 else:
                     view = self.view_indices()
-                    at_end = bool(view) and self._index == view[-1]
-                    if self.repeat == 'off' and at_end:
+                    if self.repeat == 'off' and self._pass_complete(view):
                         self._is_playing = False
                         self._status = 'stopped'
                         self._note_set_over()
@@ -1128,12 +1242,14 @@ class MediaController:
             return
         sel = self._filters.setdefault(facet, set())
         sel.discard(value) if value in sel else sel.add(value)
+        self.bag_reset()          # different set of tracks == different pass
 
     def is_filtered(self, facet: str, value: str) -> bool:
         return value in self._filters.get(facet, set())
 
     def clear_filters(self) -> None:
         self._filters = {}
+        self.bag_reset()
 
     @property
     def active_filter_count(self) -> int:
@@ -1155,11 +1271,14 @@ class MediaController:
 
     def set_mode(self, mode: str) -> None:
         if mode in ('library', 'playlists', 'favorites', 'recent'):
+            changed = mode != self.mode
             self.mode = mode
             if (mode == 'playlists' and self._playlists
                     and self.active_playlist not in self._playlists.names()):
                 names = self._playlists.names()
                 self.active_playlist = names[0] if names else None
+            if changed:
+                self.bag_reset()
 
     def toggle_favorite(self, index: int) -> str:
         """Heart a library row: flips membership in the persisted favorites."""
@@ -1247,6 +1366,14 @@ class MediaController:
         cached: list[dict[str, Any]] | None
         with _LIBRARY_SCAN_LOCK:
             cached = _LIBRARY_SCAN_CACHE.pop(key, None)
+            pending = None if cached is not None else _LIBRARY_SCAN_PENDING.get(key)
+        if pending is not None:
+            # A prescan is already walking these files.  Wait for it rather
+            # than starting a second concurrent walk of the same library.
+            pending.wait(timeout=300.0)
+            with _LIBRARY_SCAN_LOCK:
+                cached = _LIBRARY_SCAN_CACHE.pop(key, None)
+                _LIBRARY_SCAN_PENDING.pop(key, None)
         self._library = cached if cached is not None else _scan_library(self._media_dir)
         for t in self._library:
             try:
@@ -1333,11 +1460,63 @@ class MediaController:
             except Exception as exc:       # pragma: no cover - defensive
                 log.debug('media-01: set-over publish failed: %s', exc)
 
+    def bag_reset(self) -> None:
+        """Forget which tracks have played — a fresh pass over the view.
+
+        Called whenever the playback set itself changes (mode, playlist,
+        filters, shuffle) so 'every track played' is always measured against
+        the view the listener is actually hearing.
+        """
+        self._played = {self._index} if self._is_playing else set()
+
+    def _view_exhausted(self, view: list[int]) -> bool:
+        """True when every track in *view* has been played this pass."""
+        return bool(view) and all(i in self._played for i in view)
+
+    def _pass_complete(self, view: list[int]) -> bool:
+        """Has the current pass over *view* finished (repeat=='off' stops)?
+
+        Sequential play ends at the last row.  Shuffle ends when every track
+        has been played -- row position means nothing once the order is
+        permuted and playback may have started anywhere.
+        """
+        if not view:
+            return False
+        if self._shuffle:
+            return self._view_exhausted(view)
+        return self._index == view[-1]
+
+    def _next_unplayed(self, view: list[int]) -> int | None:
+        """The next not-yet-played index, scanning forward from the current
+        position and wrapping — so shuffle covers the whole view regardless of
+        where playback started.  ``None`` when the view is exhausted."""
+        if not view:
+            return None
+        try:
+            start = view.index(self._index)
+        except ValueError:
+            start = -1
+        for step in range(1, len(view) + 1):
+            cand = view[(start + step) % len(view)]
+            if cand not in self._played:
+                return cand
+        return None
+
     def _advance(self, delta: int) -> None:
         """Move within the active view (auto-advance / next / prev)."""
         view = self.view_indices()
         if not view:
             return
+        # Under shuffle, forward motion follows the bag rather than row order,
+        # so a pass ends only once every track has actually been heard.
+        if self._shuffle and delta > 0:
+            nxt = self._next_unplayed(view)
+            if nxt is None:                # bag empty: start a fresh pass
+                self._played = set()
+                nxt = self._next_unplayed(view)
+            if nxt is not None:
+                self._start_track(nxt)
+                return
         try:
             pos = (view.index(self._index) + delta) % len(view)
         except ValueError:
@@ -1575,6 +1754,7 @@ class MediaController:
             return
         index = index % len(self._library)
         self._index = index
+        self._played.add(index)
         track = self._library[index]
         path: Path = track['path']
 

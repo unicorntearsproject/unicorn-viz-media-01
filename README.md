@@ -1,7 +1,7 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.24.1
+Version: 0.24.2
 Status: beta
 Last updated: 2026-09-01
 
@@ -90,6 +90,15 @@ media-01 is paused/stopped, the Spotify track (if playing) takes the band.
 Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
+
+- **0.24.2** — Shuffle now covers the whole list: a pass ends when every
+  track has been *played*, not when playback happens to reach the last
+  *row* (starting anywhere but row 0 used to end a 10k library after a
+  handful of tracks). Library scans are cached on disk by path+size+mtime,
+  so a warm start costs one `stat` per file instead of a tag parse —
+  10,758 tracks went 11.04s to 0.12s. A constructor now waits for an
+  in-flight background prescan instead of racing it with a second
+  concurrent walk of the same library.
 
 - **0.24.1** — Fixed a routine internal `save()` (fired on every track
   change via `note_played()`'s recent-history bookkeeping, nothing to
