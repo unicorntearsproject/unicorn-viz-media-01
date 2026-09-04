@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.28.2'
+__version__ = '0.28.3'
 
 import json
 import logging
@@ -1349,21 +1349,27 @@ class MediaController:
         self._publish_track_path()
         self._publish_track_bpm()
 
-    # 64 bands: the analyzer -> deck-chrome data path. 512 raw FFT bins
-    # folded down 8:1, which is enough resolution for a real bar-by-bar
-    # spectrum strip (the previous 16-band fold was sized for a ring of
-    # chunky bars only; the strip needs more bars than that to read as an
-    # analyzer instead of a decoration).
+    # 64 log-spaced bands, matching the core `Audio Spectrum` effect
+    # (unicornviz/effects/audio_spectrum.py) exactly -- same band count,
+    # same Hz range, same visual gain curve.  That effect hit this exact
+    # "bass spike, flat everywhere else" problem once (raw magnitude spectra
+    # roll off sharply with frequency) and its fix is the right one to copy
+    # rather than reinvent: read `audio.bands`, the analyzer's own
+    # already-log-spaced, already-normalized 64-band perceptual spectrum
+    # (shared across every consumer, effects and Auto VJ alike) -- not the
+    # raw linear `audio.fft` a naive fold or a bass/mid/treble rescale (the
+    # controller's first two attempts, both superseded) can ever fix
+    # properly, since log spacing is what actually balances the bands, not
+    # any amount of rescaling a linearly-binned spectrum after the fact.
     _SPECTRUM_BANDS = 64
-
-    # Bin-index boundaries approximating the analyzer's own bass/mid/treble
-    # split (~20-250 / 250-2000 / 2000-20000 Hz for the default profile) at
-    # its assumed 48 kHz capture rate and 1024-point FFT (~46.9 Hz/bin).
-    # media-01 has no access to the live AudioProfile (only the AudioData
-    # snapshot), so these are fixed approximations -- fine for a chrome
-    # visualizer, never used for detection. See _capture_audio_levels.
-    _SPEC_BASS_BIN = 5
-    _SPEC_MID_BIN = 43
+    _SPEC_F_MIN = 30.0      # Hz -- must match Analyzer._PERC_F_MIN
+    _SPEC_F_MAX = 16_000.0  # Hz -- must match Analyzer._PERC_F_MAX
+    # Bars below this magnitude are untouched; above it they ease toward 1.0
+    # (soft knee) so loud bands leak over instead of hard-pegging flat at
+    # the top.  Identical to audio_spectrum.py's own _BAR_KNEE -- see that
+    # constant's comment for why 0.6 in particular.
+    _SPEC_KNEE = 0.6
+    _spec_band_gain: Any = None    # lazily built; see _capture_audio_levels
 
     def _capture_audio_levels(self, audio: Any) -> None:
         """Mirror the app's live audio analysis for the Media Deck's chrome.
@@ -1382,37 +1388,29 @@ class MediaController:
                 min(1.0, max(0.0, float(getattr(audio, 'treble', 0.0) or 0.0))),
                 min(1.0, max(0.0, float(getattr(audio, 'beat', 0.0) or 0.0))),
             )
-            fft = getattr(audio, 'fft', None)
-            if fft is not None and len(fft) >= 512:
-                # `audio.fft` is normalized once per FRAME against its own
-                # single loudest bin (the analyzer's own comment calls it a
-                # "shape fraction") -- and real music's magnitude rolls off
-                # sharply with frequency, so that loudest bin is almost
-                # always deep in the bass.  Built straight from this, the
-                # strip showed a bass spike and a flat line for everything
-                # else (reported 2026-09-04): correct, but visually useless.
-                #
-                # Fix: recover shape *within* each of the bass/mid/treble
-                # thirds (renormalize each against its own local max, since
-                # the global squash already erased their relative sizes),
-                # then rescale each third by the analyzer's own
-                # already-gain-balanced bass/mid/treble scalars -- the same
-                # levels the platter's glow and beat flash trust -- so the
-                # strip's overall balance matches the rest of the chrome
-                # instead of a single global (bass-dominated) max.
-                raw = fft[:512]
-                combined = raw.copy()
-                bb, mb = self._SPEC_BASS_BIN, self._SPEC_MID_BIN
-                for lo, hi, lvl in ((0, bb, self.audio_levels[0]),
-                                    (bb, mb, self.audio_levels[1]),
-                                    (mb, 512, self.audio_levels[2])):
-                    seg = raw[lo:hi]
-                    peak = float(seg.max()) if seg.size else 0.0
-                    combined[lo:hi] = (seg / peak) * lvl if peak > 1e-6 else 0.0
-                n = self._SPECTRUM_BANDS
-                bands = combined.reshape(n, 512 // n).mean(axis=1)
-                self.audio_spectrum = tuple(
-                    min(1.0, max(0.0, float(v))) for v in bands)
+            bands = getattr(audio, 'bands', None)
+            if bands is not None and len(bands) == self._SPECTRUM_BANDS:
+                import numpy as np  # noqa: PLC0415
+                if self._spec_band_gain is None:
+                    # Visual pink-noise gain: boosts higher bands to offset
+                    # music's natural rolloff, computed once from the same
+                    # log-spaced Hz centres the analyzer itself buckets by
+                    # -- no dependency on FFT bin layout.  Cached on the
+                    # class (shared by every instance; there is only ever
+                    # one real one) since it never changes at runtime.
+                    n = self._SPECTRUM_BANDS
+                    edges_hz = np.logspace(np.log10(self._SPEC_F_MIN),
+                                           np.log10(self._SPEC_F_MAX), n + 1)
+                    centers = np.sqrt(edges_hz[:-1] * edges_hz[1:])
+                    MediaController._spec_band_gain = (
+                        centers / self._SPEC_F_MIN) ** 0.35
+                spec = np.asarray(bands, dtype=np.float64) * self._spec_band_gain
+                over = spec > self._SPEC_KNEE
+                span = 1.0 - self._SPEC_KNEE
+                spec[over] = self._SPEC_KNEE + span * (
+                    1.0 - np.exp(-(spec[over] - self._SPEC_KNEE) / span))
+                np.clip(spec, 0.0, 1.0, out=spec)
+                self.audio_spectrum = tuple(float(v) for v in spec)
         except Exception:                  # never let chrome break playback
             self.audio_levels = (0.0, 0.0, 0.0, 0.0)
             self.audio_spectrum = ()

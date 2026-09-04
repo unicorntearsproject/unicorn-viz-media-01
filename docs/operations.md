@@ -100,25 +100,33 @@ to the strip below, see next). Levels are captured only while the deck
 window is open; on a core without audio levels the platter and flanks fall
 back to their old purely time-driven look.
 
-### The spectrum strip (0.28.0)
+### The spectrum strip (0.28.0, data source fixed 0.28.3)
 
 A full-width analyzer strip fills the gap between the transport and the
 settings stack — the space the platter's own flanking bars were previously
-and wrongly trying to occupy. One bar per band of the same 64-band FFT the
-platter's ring reads, each with a cyan-to-pink-to-yellow gradient (hotter
-at the tip, the louder that band is), a peak-hold cap that **drips down
-slower than the bar itself falls**, a soft neon glow, and a fading
-reflection below the baseline. A beat-reactive scanline sweeps the strip on
-the kick. Idle (nothing playing) keeps a slow breathing pattern instead of
-going flat and dark.
+and wrongly trying to occupy. One bar per band of the same 64-band
+spectrum the platter's ring reads, each with a cyan-to-pink-to-yellow
+gradient (hotter at the tip, the louder that band is), a peak-hold cap
+that **drips down slower than the bar itself falls**, a soft neon glow,
+and a fading reflection below the baseline. A beat-reactive scanline
+sweeps the strip on the kick. Idle (nothing playing) keeps a slow
+breathing pattern instead of going flat and dark.
 
-The 64 bars are built by rescaling the raw FFT's bass/mid/treble thirds
-against the analyzer's own already-balanced `bass`/`mid`/`treble` scalars
-(0.28.1), not the raw FFT alone — `AudioData.fft` is normalized per frame
-against its own single loudest bin, and real music's magnitude decays
-sharply with frequency, so a naive fold of the raw array showed a bass
-spike and a flat line for everything else. See `_capture_audio_levels` in
-`media_controller.py` for the exact bin-boundary approximation.
+The 64 bars read `audio.bands` — the analyzer's own already-**log-spaced**,
+already-normalized 64-band perceptual spectrum (shared across every
+consumer, effects and Auto VJ alike) — not `audio.fft` (raw, linearly
+binned, and normalized per frame against its own single loudest bin, which
+is almost always deep bass; real music's magnitude rolls off sharply with
+frequency, so a naive fold of that array — or even a bass/mid/treble
+rescale of it, 0.28.1's attempt — still read as a bass spike and a flat
+line). This is the same approach the core `Audio Spectrum` effect
+(`unicornviz/effects/audio_spectrum.py`) uses, which hit the identical
+problem once: on top of `audio.bands`, a pink-noise visual gain curve
+`(center_hz / 30.0) ** 0.35` boosts higher bands to offset the natural
+rolloff, followed by a soft-knee compressor (`_SPEC_KNEE = 0.6`, matching
+that effect's `_BAR_KNEE`) so loud transients ease toward the top instead
+of hard-pegging flat there. See `_capture_audio_levels` in
+`media_controller.py`.
 
 ### SPARKLE (0.28.0)
 

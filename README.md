@@ -1,7 +1,7 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.28.2
+Version: 0.28.3
 Status: beta
 Last updated: 2026-09-04
 
@@ -98,6 +98,26 @@ Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
 
+- **0.28.3** — **The spectrum strip was still flat after 0.28.1's fix, for
+  real this time.** 0.28.1 correctly diagnosed `audio.fft`'s per-frame
+  max-normalization as the cause, but its own fix (rescaling the raw
+  linear FFT's bass/mid/treble thirds by the analyzer's scalars) was still
+  built on a linearly-binned spectrum, which can't actually be balanced by
+  rescaling alone. Owner: "check out the audio spectrum core effect for
+  it's solution, it had that problem once." It had: the core `Audio
+  Spectrum` effect (`unicornviz/effects/audio_spectrum.py`) reads
+  `audio.bands` — the analyzer's own already-**log-spaced**, already-
+  normalized 64-band perceptual spectrum (shared across every consumer,
+  effects and Auto VJ alike) — instead of the raw linear `audio.fft`, and
+  applies a pink-noise visual gain curve `(center_hz / 30.0) ** 0.35` plus
+  a soft-knee compressor (`_BAR_KNEE = 0.6`) on top, boosting higher bands
+  to offset music's natural rolloff. Copied that exact approach rather
+  than reinvent a third one: same 64 bands (already matched), same Hz
+  range (30–16000), same gain exponent, same knee. The bass/mid/treble
+  rescue hack is gone entirely — log spacing was the fix, not rescaling.
+  New regression tests: a realistic decaying `audio.bands` fixture proves
+  the gain curve brings the upper bands to life, and a no-`bands` fixture
+  proves the fallback stays empty rather than guessing.
 - **0.28.2** — Three more bugs from the same round of 0.28.x screenshots,
   plus a styling ask ("the library/folder texts are drab af, they need
   some sparkle baby!"):
