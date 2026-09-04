@@ -299,6 +299,52 @@ def test_audio_levels_are_captured_only_while_the_deck_is_open(tmp_path) -> None
     ctl.shutdown()
 
 
+def test_spectrum_survives_a_bass_dominated_global_normalization(tmp_path) -> None:
+    """Regression, reported 2026-09-04: the strip showed a bass spike and a
+    flat line for the rest of the 64 bars.
+
+    ``audio.fft`` is normalized once per frame against its own single
+    loudest bin (the analyzer's own "shape fraction"), and real music's
+    magnitude rolls off sharply with frequency -- so that loudest bin is
+    almost always deep in the bass, and every other bin arrives as a tiny
+    fraction of it.  Simulate exactly that: a ~1/f-decaying spectrum,
+    globally max-normalized the way the analyzer's own code does it.  A
+    naive contiguous fold leaves only a handful of the 64 bands above the
+    noise floor; the fix (rescale each of the bass/mid/treble thirds by the
+    analyzer's own already-balanced scalars) must leave most of them live.
+    """
+    np = pytest.importorskip('numpy')
+    ctl = _controller(tmp_path, [dict(t) for t in _TRACKS])
+    ctl._window = object()
+
+    bins = np.arange(1, 513, dtype=np.float64)
+    raw = 1.0 / (bins ** 1.3)
+    raw = raw / raw.max()          # the analyzer's own per-frame max-normalize
+
+    class _Audio:
+        bass, mid, treble, beat = 0.7, 0.5, 0.35, 0.6
+        fft = raw.astype(np.float32)
+
+    # What the OLD naive contiguous fold would have produced, for contrast.
+    naive = raw.reshape(64, 8).mean(axis=1)
+    assert sum(1 for v in naive if v > 0.02) <= 5, 'fixture is not bass-heavy enough'
+
+    ctl._capture_audio_levels(_Audio())
+    spec = ctl.audio_spectrum
+    assert len(spec) == 64
+    assert all(0.0 <= v <= 1.0 for v in spec)
+    live = sum(1 for v in spec if v > 0.02)
+    assert live >= 40, f'only {live}/64 bands registered -- still bass-spike-then-flat'
+    # A pure power-law fixture still legitimately decays *within* the
+    # treble third (real audio does too), so the fix isn't "the top bands
+    # hit some absolute floor" -- it's "meaningfully better than the
+    # broken behavior".  Compare against what the old naive fold left in
+    # the same bands: a >=5x improvement there is not measurement noise.
+    assert max(spec[40:]) > max(naive[40:]) * 5
+    ctl._window = None
+    ctl.shutdown()
+
+
 def test_snapshot_carries_genre_and_year(tmp_path) -> None:
     ctl = _controller(tmp_path, [dict(t) for t in _TRACKS])
 

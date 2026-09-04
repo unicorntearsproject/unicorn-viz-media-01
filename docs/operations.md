@@ -112,6 +112,14 @@ reflection below the baseline. A beat-reactive scanline sweeps the strip on
 the kick. Idle (nothing playing) keeps a slow breathing pattern instead of
 going flat and dark.
 
+The 64 bars are built by rescaling the raw FFT's bass/mid/treble thirds
+against the analyzer's own already-balanced `bass`/`mid`/`treble` scalars
+(0.28.1), not the raw FFT alone — `AudioData.fft` is normalized per frame
+against its own single loudest bin, and real music's magnitude decays
+sharply with frequency, so a naive fold of the raw array showed a bass
+spike and a flat line for everything else. See `_capture_audio_levels` in
+`media_controller.py` for the exact bin-boundary approximation.
+
 ### SPARKLE (0.28.0)
 
 A slider next to the settings checkboxes controls the intensity of the

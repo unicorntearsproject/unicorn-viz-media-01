@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.28.0'
+__version__ = '0.28.1'
 
 import json
 import logging
@@ -1356,6 +1356,15 @@ class MediaController:
     # analyzer instead of a decoration).
     _SPECTRUM_BANDS = 64
 
+    # Bin-index boundaries approximating the analyzer's own bass/mid/treble
+    # split (~20-250 / 250-2000 / 2000-20000 Hz for the default profile) at
+    # its assumed 48 kHz capture rate and 1024-point FFT (~46.9 Hz/bin).
+    # media-01 has no access to the live AudioProfile (only the AudioData
+    # snapshot), so these are fixed approximations -- fine for a chrome
+    # visualizer, never used for detection. See _capture_audio_levels.
+    _SPEC_BASS_BIN = 5
+    _SPEC_MID_BIN = 43
+
     def _capture_audio_levels(self, audio: Any) -> None:
         """Mirror the app's live audio analysis for the Media Deck's chrome.
 
@@ -1375,8 +1384,33 @@ class MediaController:
             )
             fft = getattr(audio, 'fft', None)
             if fft is not None and len(fft) >= 512:
+                # `audio.fft` is normalized once per FRAME against its own
+                # single loudest bin (the analyzer's own comment calls it a
+                # "shape fraction") -- and real music's magnitude rolls off
+                # sharply with frequency, so that loudest bin is almost
+                # always deep in the bass.  Built straight from this, the
+                # strip showed a bass spike and a flat line for everything
+                # else (reported 2026-09-04): correct, but visually useless.
+                #
+                # Fix: recover shape *within* each of the bass/mid/treble
+                # thirds (renormalize each against its own local max, since
+                # the global squash already erased their relative sizes),
+                # then rescale each third by the analyzer's own
+                # already-gain-balanced bass/mid/treble scalars -- the same
+                # levels the platter's glow and beat flash trust -- so the
+                # strip's overall balance matches the rest of the chrome
+                # instead of a single global (bass-dominated) max.
+                raw = fft[:512]
+                combined = raw.copy()
+                bb, mb = self._SPEC_BASS_BIN, self._SPEC_MID_BIN
+                for lo, hi, lvl in ((0, bb, self.audio_levels[0]),
+                                    (bb, mb, self.audio_levels[1]),
+                                    (mb, 512, self.audio_levels[2])):
+                    seg = raw[lo:hi]
+                    peak = float(seg.max()) if seg.size else 0.0
+                    combined[lo:hi] = (seg / peak) * lvl if peak > 1e-6 else 0.0
                 n = self._SPECTRUM_BANDS
-                bands = fft[:512].reshape(n, 512 // n).mean(axis=1)
+                bands = combined.reshape(n, 512 // n).mean(axis=1)
                 self.audio_spectrum = tuple(
                     min(1.0, max(0.0, float(v))) for v in bands)
         except Exception:                  # never let chrome break playback

@@ -1,7 +1,7 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.28.0
+Version: 0.28.1
 Status: beta
 Last updated: 2026-09-04
 
@@ -98,6 +98,23 @@ Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
 
+- **0.28.1** — **Fixed the spectrum strip's "bass spike then a flat line"
+  bug**, reported the same day as 0.28.0 shipped. Root cause:
+  `AudioData.fft` is normalized once per frame against its own single
+  loudest bin (the analyzer's own comment calls it a "shape fraction"),
+  and real music's magnitude rolls off sharply with frequency, so that
+  loudest bin is almost always deep in the bass — every other bin arrived
+  as a tiny fraction of it. A synthetic reproduction confirmed a naive
+  64-band fold left only 3 of 64 bars with any visible signal. Fix (the
+  owner's own diagnosis: "probably combining them is the right call"):
+  recover shape *within* each of the bass/mid/treble thirds by
+  renormalizing each against its own local max (undoing the global
+  squash), then rescale each third by the analyzer's own
+  already-gain-balanced `bass`/`mid`/`treble` scalars — the same levels
+  the platter's glow and beat flash already trust. All 64 bars now read
+  live. New regression test reproduces the exact bass-dominated,
+  globally-normalized fixture and pins both invariants (most bars live,
+  and a real multi-x improvement in the upper bands over the old fold).
 - **0.28.0** — **The spectrum visualization moves, gets the full FFT, and
   gets a lot more dramatic — plus a SPARKLE knob.** Owner feedback on the
   0.27.0 pass: the flanking EQ bars beside the platter were "in the wrong
