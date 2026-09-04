@@ -771,3 +771,107 @@ def test_spectrum_strip_gets_real_room_at_the_default_window_size() -> None:
     # and a spectrum draw was at least attempted (spec_peaks populated).
     assert len(win._spec_peaks) > 0
     win.close_now()
+
+
+# -- three bugs reported 2026-09-04 against 0.28.1's live screenshots ---------
+
+def test_spectrum_strip_never_draws_past_its_own_bottom_edge() -> None:
+    """The reflection used to spill up to 16px below the strip's own y1 and
+    straight into whatever was drawn next (the settings checkboxes) --
+    "the bar below its horizon, overlapping the toggle text".  Render the
+    strip alone into a tightly-cropped canvas and assert nothing paints in
+    the margin below y1."""
+    from PIL import Image, ImageDraw
+    ctl = _BigStub()
+    win = _window(ctl)
+    y1 = 150
+    margin = 20                       # comfortably more than the old 16px leak
+    img = Image.new('RGBA', (300, y1 + margin), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img, 'RGBA')
+    loud = tuple(0.9 for _ in range(64))       # worst case: every bar maxed
+    win._draw_spectrum_strip(d, 10, 290, 20, y1, True, loud,
+                             (0.5, 0.5, 0.5, 0.9), sparkle_gain=1.0)
+    below = img.crop((0, y1 + 1, 300, y1 + margin))
+    assert below.getbbox() is None, 'something drew past the strip\'s own y1'
+    win.close_now()
+
+
+def test_status_chip_has_right_side_padding() -> None:
+    """The PLAYING chip's text used to sit 2px shy of the pill's own border
+    -- "needs internal padding on the right".  Render the header and check
+    for a real gap of background between the last text pixel and the
+    pill's right edge, not just "some space"."""
+    ctl = _BigStub()
+    ctl.playing = True
+    win = _window(ctl)
+    img = win._render_ui()
+    w = win._width
+    # Scan the chip's vertical middle (y ~ 22) from its own right border
+    # (x = w-12) leftward; the first several pixels must be the pill's dark
+    # interior, not the bright status-text colour, or there is no padding.
+    row = [img.getpixel((x, 22)) for x in range(w - 40, w - 11)]
+    # The pill interior/background is dark; status text (HOT green while
+    # playing) is bright.  The rightmost 8px before the border must all be
+    # dark -- i.e. not text.
+    border_zone = row[-9:-1]
+    assert all(px[1] < 140 for px in border_zone), (
+        'bright text pixel found within 8px of the chip\'s own border')
+    win.close_now()
+
+
+def test_active_row_highlight_follows_library_index_not_name_string() -> None:
+    """The playing-row highlight used to match by the constructed display
+    name ('Artist - Title') instead of the library index -- so two tracks
+    sharing a name (duplicate metadata, or both untagged) could light up
+    together, or the wrong one, while the real one stayed dark.  Reported
+    as "the active song highlight ... illegible and mis-aligned".
+
+    Give every row the exact same name and check the *rendered pixels*:
+    the row at library_index must get the playing bed, and a same-named
+    neighbour must not -- proving the match is by index, not by string
+    (the old code would have lit up every row, or none, identically)."""
+    class _Dup(_BigStub):
+        def library_names(self):
+            return ['Same Name - Same Name' for _ in range(30)]
+
+    dup = _Dup()
+    dup.playing = True
+    dup.library_index = 5
+    win = _window(dup)
+    img = win._render_ui()
+    row5 = next(r for r in win._rows if r[4] == 5)
+    row6 = next(r for r in win._rows if r[4] == 6)
+
+    def _mid(r):
+        return (r[0] + r[2]) // 2, (r[1] + r[3]) // 2
+
+    assert img.getpixel(_mid(row5)) != img.getpixel(_mid(row6)), (
+        'a same-named neighbour lit up identically to the actually-playing row')
+    win.close_now()
+
+
+def test_crate_accent_produces_a_real_spread_of_colour() -> None:
+    """Owner feedback 2026-09-04: 'the library/folder texts are drab af'.
+    The cyan->pink accent ramp used for plain rows and folded crates must
+    actually vary across the depth/index range -- a regression that always
+    fell back to one colour would silently recreate the flat-grey look."""
+    accents = [_ui._crate_accent(d) for d in range(6)]
+    assert len(set(accents)) == 6                    # every depth distinct
+    assert accents[0][:3] == _ui._WAVE_HI[:3]          # depth 0: pure cyan
+    assert accents[5][:3] == _ui._PINK[:3]             # depth 5: pure pink
+    for col in accents:
+        assert len(col) == 4 and col[3] == 255         # opaque RGBA
+
+
+def test_plain_rows_and_folded_crates_use_the_accent_ramp() -> None:
+    """Source-level pin: the drab-grey branches (a plain library row's
+    title, and a folded non-empty/non-excluded crate label) must resolve
+    through _crate_accent rather than a flat constant -- pixel-sampling
+    anti-aliased, per-row-unique text for colour is too fragile to assert
+    directly, so this pins the wiring instead of the pixels."""
+    src = (Path(__file__).resolve().parent.parent / 'ui.py').read_text(
+        encoding='utf-8')
+    # The plain-row ncol branch.
+    assert 'else _crate_accent(i % 6))' in src
+    # The folded-crate label branch.
+    assert 'else _crate_accent(depth))' in src

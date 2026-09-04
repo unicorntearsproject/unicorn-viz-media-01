@@ -187,6 +187,16 @@ def _spectrum_color(v: float) -> tuple[int, int, int]:
     return tuple(int(a[c] * (1 - f) + b[c] * f) for c in range(3))
 
 
+def _crate_accent(depth: int) -> tuple[int, int, int, int]:
+    """Cyan -> pink across crate *depth* (0..5+) -- a folded crate's text
+    accent, following the same hue ramp the depth-tinted background already
+    uses, so the tree reads as one coordinated gradient instead of tinted
+    boxes over flat grey text."""
+    f = min(depth, 5) / 5.0
+    return tuple(int(_WAVE_HI[c] * (1 - f) + _PINK[c] * f)
+                 for c in range(3)) + (255,)
+
+
 class MediaDeckWindow:
     """Own-window renderer/controller UI for the local media player."""
 
@@ -1283,7 +1293,11 @@ class MediaDeckWindow:
                 tx0 += len(seg_text) * 11
         status = str(snap.get('status', 'off') or 'off').upper()
         scol = _HOT if playing else _DIM
-        chip_w = len(status) * 7 + 26
+        # Dot + gap on the left (14px), text, then real right-side padding
+        # (10px) before the pill's own edge -- the text used to sit just
+        # 2px shy of the border, reported 2026-09-04 ("needs internal
+        # padding on the right").
+        chip_w = len(status) * 7 + 26 + 10
         d.rounded_rectangle([w - chip_w - 12, 10, w - 12, 34], radius=12,
                             fill=(0, 0, 0, 70), outline=scol)
         dot_pulse = 0.5 + 0.5 * abs((time.monotonic() * 1.2) % 2.0 - 1.0)
@@ -1535,7 +1549,7 @@ class MediaDeckWindow:
         # platter's own flanking bars were wrongly trying to occupy.
         strip_top = cy + th + 10
         strip_bot = cb_top - 8
-        if strip_bot - strip_top >= 24:     # a short window: not worth it
+        if strip_bot - strip_top >= 36:     # a short window: not worth it
             self._draw_spectrum_strip(
                 d, lx0, lx1, strip_top, strip_bot, playing,
                 getattr(self._c, 'audio_spectrum', ()), levels, sparkle)
@@ -1803,13 +1817,26 @@ class MediaDeckWindow:
                 # Empty crates read dimmer than merely-unselected ones, so
                 # 'nothing in here' is legible before you click it.
                 empty = not excluded and not bcount
+                # A folded crate used to be flat grey no matter how deep it
+                # sat -- drab, per owner feedback 2026-09-04.  Its accent now
+                # follows the same cyan->pink hue ramp the depth-tinted
+                # background already uses, so the tree reads as one
+                # coordinated neon gradient instead of tinted boxes over
+                # lifeless text; empty/excluded keep their own meaning
+                # (dim/warn), since those are signals, not decoration.
                 lcol = (_WARN if excluded else
                         (_TEXT if (is_open or on_chain)
-                         else (_FAINT if empty else _DIM)))
+                         else (_FAINT if empty else _crate_accent(depth))))
                 tag = '× ' if excluded else ''
                 arrow = '▼' if (is_open or on_chain) else '►'
-                d.text((rx0 + 6 + indent, hy + 3),
-                       f'{arrow} {tag}{blabel[:16]} ({bcount})',
+                label = f'{arrow} {tag}{blabel[:16]} ({bcount})'
+                if is_open:
+                    # The open crate is the hero row: a soft glow-echo
+                    # behind the crisp label, the same trick the header
+                    # wordmark uses.
+                    d.text((rx0 + 7 + indent, hy + 4), label,
+                           font=self._font_s, fill=_EDGE[:3] + (90,))
+                d.text((rx0 + 6 + indent, hy + 3), label,
                        font=self._font_s, fill=lcol)
                 regions.append((rx0, hy, rx1 - 30, hy + hh - 2,
                                 'set_bucket', bkey))
@@ -1859,7 +1886,7 @@ class MediaDeckWindow:
                                       'folders', sbars)
                 hy = list_top
                 stats_of = getattr(self._c, 'playlist_stats', None)
-                for nm in shown:
+                for pl_pos, nm in enumerate(shown):
                     active = nm == cur
                     try:
                         n = len(pl_store.tracks(nm))
@@ -1876,9 +1903,18 @@ class MediaDeckWindow:
                     pst = stats_of(nm) if callable(stats_of) else {}
                     tail = (f' ({n} · {_hms(pst.get("duration_s", 0.0))})'
                             if pst else f' ({n})')
-                    d.text((rx0 + 8, hy + 3), f'{nm[:18]}{tail}',
-                           font=self._font_s,
-                           fill=_TEXT if active else (_FAINT if not n else _DIM))
+                    label2 = f'{nm[:18]}{tail}'
+                    # Same cyan->pink accent ramp as the crate tree, cycled
+                    # by row position -- a flat grey list used to be the
+                    # complaint ("drab af"), and this is the same fix.
+                    lcol2 = (_TEXT if active
+                            else (_FAINT if not n
+                                  else _crate_accent(pl_pos % 6)))
+                    if active:                  # hero row: glow-echo
+                        d.text((rx0 + 9, hy + 4), label2,
+                               font=self._font_s, fill=_EDGE[:3] + (90,))
+                    d.text((rx0 + 8, hy + 3), label2, font=self._font_s,
+                           fill=lcol2)
                     dead = int(pst.get('missing', 0) or 0)
                     if dead:
                         d.text((rx1 - 54, hy + 3), f'!{dead}',
@@ -1905,7 +1941,14 @@ class MediaDeckWindow:
         self._scroll = max(0, min(max(0, len(view) - self._rows_visible),
                                   self._scroll))
         offset = self._scroll
-        playing_name = (f'{artist} - {title}' if artist else title)
+        # By library index, not by matching the constructed display-name
+        # string -- two tracks can legitimately share a name (duplicate
+        # metadata, or both falling back to the same untagged filename),
+        # and a string match then lit up every one of them, or the wrong
+        # one, while the actually-playing row stayed dark.  Reported
+        # 2026-09-04 as "the active song highlight ... illegible and
+        # mis-aligned" -- the glow was on a row that wasn't playing.
+        live_idx = int(getattr(self._c, 'library_index', -1))
         # ARTIST and TITLE get their own columns rather than one joined
         # string: joined text cannot column-align, and on a long list the eye
         # scans one field at a time.  Artist takes the smaller share -- it is
@@ -1926,7 +1969,7 @@ class MediaDeckWindow:
             idx, name = view[i]
             ry = list_top + (i - offset) * row_h
             is_sel = i == self._sel
-            is_live = playing and name == playing_name
+            is_live = playing and idx == live_idx
             hovered = (rx0 <= hx <= rx1 and ry - 1 <= hy_m <= ry + row_h - 3)
             # Bed order: playing, then selection, then hover on top -- each
             # replaces the last as a *statement*, and hover only lifts what is
@@ -1952,7 +1995,15 @@ class MediaDeckWindow:
                 self._drip_row(d, rx0, ry - 1, rx1, ry + row_h - 3)
             if is_sel:
                 d.text((rx0 + 2, ry), '►', font=self._font_s, fill=_HOT)
-            ncol = _WAVE_HI if is_live else (_TEXT if is_sel else _DIM)
+            # A plain row used to be flat battleship grey no matter what --
+            # "drab af", per owner feedback 2026-09-04.  It now cycles the
+            # same cyan->pink accent ramp the crate tree uses, keyed to the
+            # row's own (stable, scroll-independent) view index so a track
+            # keeps its colour as you scroll past it.  is_sel/is_live stay
+            # their own strong, unambiguous colours -- those are state, not
+            # decoration, and must never be lost in the cycle.
+            ncol = (_WAVE_HI if is_live
+                   else (_TEXT if is_sel else _crate_accent(i % 6)))
             artist, title, dur = parts.get(idx, ('', name, 0.0))
             tx = rx0 + 14
             if artist:
@@ -2320,8 +2371,17 @@ class MediaDeckWindow:
         alone and only removes the twinkle layer.
         """
         width, height = x1 - x0, y1 - y0
-        if width < 40 or height < 20:
+        if width < 40 or height < 30:
             return
+        # The reflection lives *inside* [y0, y1], not below y1 -- it used to
+        # spill up to 16px past the strip's own bottom edge and directly
+        # into whatever was drawn next (the settings checkboxes), reported
+        # 2026-09-04 ("the bar below its horizon, overlapping the toggle
+        # text").  Reserving its room up front means nothing this method
+        # draws can ever land outside the box the caller gave it.
+        refl_room = 16.0
+        base_y = y1 - refl_room
+        bar_span = max(1.0, height - refl_room)
         _bass, _mid, treble, beat = (tuple(levels) + (0.0,) * 4)[:4]
         spec = tuple(spectrum) if spectrum else ()
         n = len(spec) if spec else 32
@@ -2332,7 +2392,7 @@ class MediaDeckWindow:
         self._spec_peak_t = now
         gap_px = 2.0
         bar_w = max(1.0, (width - (n - 1) * gap_px) / n)
-        fall = height * self._SPEC_FALL_PER_S
+        fall = bar_span * self._SPEC_FALL_PER_S
         for i in range(n):
             if playing and spec:
                 v = float(spec[i])
@@ -2341,7 +2401,7 @@ class MediaDeckWindow:
                 # read as "broken", just quiet.
                 v = 0.04 + 0.035 * math.sin(now * 0.55 + i * 0.4)
             v = max(0.0, min(1.0, v))
-            bar_h = height * min(1.0, 0.03 + v * 0.97)
+            bar_h = bar_span * min(1.0, 0.03 + v * 0.97)
             peak = max(bar_h, self._spec_peaks[i] - fall * dt)
             self._spec_peaks[i] = peak
             bx0 = x0 + i * (bar_w + gap_px)
@@ -2349,7 +2409,7 @@ class MediaDeckWindow:
             col = _spectrum_color(v)
             # Glow: a softer, slightly wider duplicate behind the bar --
             # cheap neon bloom, same trick the header wordmark uses.
-            d.rectangle([bx0 - 1, y1 - bar_h - 2, bx1 + 1, y1],
+            d.rectangle([bx0 - 1, base_y - bar_h - 2, bx1 + 1, base_y],
                        fill=col + (int(46 * (0.4 + 0.6 * v)),))
             # Body: a short vertical gradient, cool base rising to a hot tip
             # -- the "melting" read, one bar at a time.
@@ -2358,12 +2418,12 @@ class MediaDeckWindow:
                 f1 = (si + 1) / slices
                 seg = tuple(int(_WAVE_HI[c] * (1 - f1) + col[c] * f1)
                            for c in range(3))
-                sy0 = y1 - bar_h * f1
-                sy1 = y1 - bar_h * (si / slices)
+                sy0 = base_y - bar_h * f1
+                sy1 = base_y - bar_h * (si / slices)
                 d.rectangle([bx0, sy0, bx1, sy1], fill=seg + (210,))
             # Peak cap, and the drip trail down to wherever the bar has
             # fallen to since -- a melting streak, not a hard edge.
-            peak_y = y1 - peak
+            peak_y = base_y - peak
             if peak > bar_h + 1.5:
                 trail_h = peak - bar_h
                 steps = max(1, int(trail_h // 3))
@@ -2375,12 +2435,13 @@ class MediaDeckWindow:
             d.rectangle([bx0, peak_y - 2, bx1, peak_y],
                        fill=(255, 255, 255, 220))
             # Reflection: a fading mirror below the baseline, like a wet
-            # floor under the analyzer.
-            refl_h = min(bar_h * 0.4, 14.0)
+            # floor under the analyzer -- capped so it never reaches past
+            # the reserved refl_room, i.e. never past y1.
+            refl_h = min(bar_h * 0.4, refl_room - 2.0)
             rsteps = 5
             for s in range(rsteps):
                 fa = (1.0 - s / rsteps) * 0.22
-                ry0 = y1 + 2 + s * (refl_h / rsteps)
+                ry0 = base_y + 2 + s * (refl_h / rsteps)
                 d.rectangle([bx0, ry0, bx1, ry0 + refl_h / rsteps],
                            fill=col + (int(255 * fa),))
             # Sparkle flecks on the hottest bars -- the only part of this
@@ -2394,7 +2455,7 @@ class MediaDeckWindow:
                              fill=(255, 255, 255, alpha))
         # Beat flash: a bright scanline sweeping the strip's mid-height.
         if playing and beat > 0.08:
-            fy = y1 - height * 0.5
+            fy = base_y - bar_span * 0.5
             d.line([x0, fy, x1, fy],
                   fill=_WAVE_HI[:3] + (int(90 * beat),), width=1)
 

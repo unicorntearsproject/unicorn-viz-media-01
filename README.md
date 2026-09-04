@@ -1,7 +1,7 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.28.1
+Version: 0.28.2
 Status: beta
 Last updated: 2026-09-04
 
@@ -98,6 +98,36 @@ Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
 
+- **0.28.2** — Three more bugs from the same round of 0.28.x screenshots,
+  plus a styling ask ("the library/folder texts are drab af, they need
+  some sparkle baby!"):
+  - **Spectrum strip overlapping the toggle text.** The reflection under
+    each bar drew up to 16px *below* the strip's own bottom edge and
+    straight into the settings checkboxes below it. Its room is now
+    reserved inside the box the strip is given, so nothing it draws can
+    ever land outside it; the strip also declines to render at all below
+    a usable height (raised 24px → 36px) rather than cramming reflections
+    into no space.
+  - **PLAYING chip needed right-side padding.** The text sat 2px shy of
+    the pill's own border. Padding budget increased.
+  - **The active-song highlight was matching by display-name string, not
+    library index.** Two tracks sharing a name (duplicate metadata, or
+    both falling back to the same untagged filename) could both light up,
+    or the wrong one could, while the actually-playing row stayed dark —
+    reported as "illegible and mis-aligned". Now compares the row's real
+    library index against `MediaController.library_index`, which is exact
+    regardless of what any track happens to be named.
+  - **Library/folder text glam.** A plain library row's title and a
+    folded (non-empty, non-excluded) crate label were flat grey no matter
+    what; both now cycle the same cyan→pink accent ramp the depth-tinted
+    crate backgrounds already used (`_crate_accent`), and the open crate /
+    active playlist get a soft glow-echo behind their label, the same
+    trick the header wordmark uses.
+  - 5 new regression tests: strict containment (worst-case bars into a
+    tightly-cropped canvas, assert nothing paints past y1), a pixel check
+    for real chip padding, a duplicate-name fixture proving the highlight
+    follows index not string, and two pins on the accent ramp's spread and
+    wiring.
 - **0.28.1** — **Fixed the spectrum strip's "bass spike then a flat line"
   bug**, reported the same day as 0.28.0 shipped. Root cause:
   `AudioData.fft` is normalized once per frame against its own single
