@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.28.3'
+__version__ = '0.28.4'
 
 import json
 import logging
@@ -396,6 +396,38 @@ class _VlcBackend:
         return int(max(0.0, min(200.0,
                                 self._volume * self._gains[idx] * frac)))
 
+    def _output_is_live(self, idx: int) -> bool:
+        """True when player *idx* actually has an audio output object.
+
+        ``audio_set_volume()`` reaches straight into libvlc's aout.  Between
+        ``play()`` and the first decoded frame that object does not exist, and
+        the pulse/PipeWire module then walks a null thread loop and takes the
+        whole process down with SIGSEGV -- not an exception, so the
+        ``try/except`` wrappers around these calls never see it.
+
+        ``get_time()`` only advances once output is running, which makes it
+        the cheapest honest proxy for "safe to touch".  See the __init__ note:
+        never set volume on a player without a live audio output.
+        """
+        try:
+            return self._players[idx].get_time() > 0
+        except Exception:
+            return False
+
+    def _set_volume(self, idx: int, volume: int) -> bool:
+        """Set player *idx*'s volume if its output is live; skip if not.
+
+        Skipping is safe by construction: a player with no audio output is
+        also a player nobody can hear yet, so there is nothing to be loud.
+        """
+        if not self._output_is_live(idx):
+            return False
+        try:
+            self._players[idx].audio_set_volume(int(volume))
+            return True
+        except Exception:
+            return False
+
     def set_track_gain(self, gain: float) -> None:
         """Auto-level: set the ACTIVE player's loudness gain.
 
@@ -442,10 +474,12 @@ class _VlcBackend:
             inc = self._players[1 - out_idx]
             inc.set_media(self._instance.media_new(str(path)))
             inc.play()
-            try:
-                inc.audio_set_volume(0)   # start silent; ramp brings it up
-            except Exception:
-                pass
+            # No audio_set_volume() here.  This line segfaulted on 2026-09-04:
+            # play() is async, so the incoming player has no aout yet and the
+            # call crashed inside the pulse module.  It is also unnecessary --
+            # a player with no output cannot be heard, and tick()'s ramp sets
+            # the real level on the first frame the output is live, which at
+            # fade start is ~0 anyway.
             self._end_fade(hard=True)     # collapse any fade already running
             self._active = 1 - out_idx
             self._gains[self._active] = 1.0   # unity until measured
@@ -468,9 +502,8 @@ class _VlcBackend:
         self._fade[0] += max(0.0, float(dt))
         t = min(1.0, self._fade[0] / self._fade[1])
         out_idx = self._fade[2]
-        self._players[self._active].audio_set_volume(
-            self._eff(self._active, t))
-        self._players[out_idx].audio_set_volume(self._eff(out_idx, 1.0 - t))
+        self._set_volume(self._active, self._eff(self._active, t))
+        self._set_volume(out_idx, self._eff(out_idx, 1.0 - t))
         if t >= 1.0:
             self._end_fade()
 
@@ -481,12 +514,15 @@ class _VlcBackend:
         self._fade = None
         try:
             self._players[out_idx].stop()
-            self._players[out_idx].audio_set_volume(self._eff(out_idx))
-            if hard:
-                self._players[self._active].audio_set_volume(
-                    self._eff(self._active))
         except Exception:
             pass
+        # Restore levels for the next use, but only where the output survived
+        # the stop() above -- the same hazard as crossfade_to, mirrored.  A
+        # player whose output is gone gets its volume set by play()'s deferred
+        # path the next time it is used.
+        self._set_volume(out_idx, self._eff(out_idx))
+        if hard:
+            self._set_volume(self._active, self._eff(self._active))
 
     def pause(self) -> None:
         self._player.pause()

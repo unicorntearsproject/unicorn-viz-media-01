@@ -1,7 +1,7 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.28.3
+Version: 0.28.4
 Status: beta
 Last updated: 2026-09-04
 
@@ -97,6 +97,18 @@ media-01 is paused/stopped, the Spotify track (if playing) takes the band.
 Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
+
+- **0.28.4** — **Fixed a hard crash (SIGSEGV) when starting a track with
+  crossfade on.** `crossfade_to()` called `audio_set_volume(0)` on the
+  incoming player the instant after `play()`, but `play()` is asynchronous:
+  libvlc has no audio output object yet, and the pulse/PipeWire module
+  dereferenced a null thread loop and killed the process. The surrounding
+  `try/except` never saw it — a native segfault is not a Python exception.
+  Two more paths had the same unguarded call: the crossfade ramp in `tick()`
+  (both players, every frame) and `_end_fade()` (on a player it had just
+  stopped). All three now go through one guard that only touches a player
+  whose audio output is actually live, which is the rule `_VlcBackend`
+  already documented but did not enforce.
 
 - **0.28.3** — **The spectrum strip was still flat after 0.28.1's fix, for
   real this time.** 0.28.1 correctly diagnosed `audio.fft`'s per-frame
