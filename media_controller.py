@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.26.0'
+__version__ = '0.27.0'
 
 import json
 import logging
@@ -137,6 +137,115 @@ _LIBRARY_SCAN_LOCK = threading.Lock()
 # so the library was scanned twice at once and the two contended for disk
 # (2026-09-02).  Waiting is strictly faster than duplicating the work.
 _LIBRARY_SCAN_PENDING: dict[str, threading.Event] = {}
+
+
+# -- auto-level (loudness match) ---------------------------------------------
+#
+# A deliberate copy of dj-mixer-01's deck auto-gain (the two drop-ins run in
+# isolation, so each carries its own -- same policy as tags.py): K-weighted
+# RMS (ITU-R BS.1770) over the loudest half of the track, normalized to the
+# mixer's target and clamped so a pathological file can never slam the mix.
+# Keep these three constants in step with dj-mixer-01/deck.py.
+_AUTOGAIN_TARGET_RMS = 0.093
+_AUTOGAIN_MIN, _AUTOGAIN_MAX = 0.4, 2.5
+
+
+def _k_weight_coeffs(fs: float):
+    """ITU-R BS.1770 K-weighting biquads (b, a) for samplerate *fs*.
+
+    Two stages: a high-shelf "pre-filter" modelling the head's boost of the
+    presence band, and an RLB high-pass de-weighting sub-bass.  Parametric
+    rather than the tabulated 48 kHz constants, so it is exact at any rate.
+    Unweighted RMS over-counts bass: a bass-heavy track measures louder than
+    it sounds and gets pulled down too far against a bright one.
+    """
+    import numpy as np  # noqa: PLC0415
+    f0, g, q = 1681.9744509555319, 3.99984385397, 0.7071752369554193
+    k = np.tan(np.pi * f0 / fs)
+    vh = 10.0 ** (g / 20.0)
+    vb = vh ** 0.4996667741545416
+    a0 = 1 + k / q + k * k
+    b1 = np.array([(vh + vb * k / q + k * k) / a0, 2 * (k * k - vh) / a0,
+                   (vh - vb * k / q + k * k) / a0])
+    a1 = np.array([1.0, 2 * (k * k - 1) / a0, (1 - k / q + k * k) / a0])
+    f0, q = 38.13547087613982, 0.5003270373253953
+    k = np.tan(np.pi * f0 / fs)
+    a0 = 1 + k / q + k * k
+    b2 = np.array([1.0, -2.0, 1.0])
+    a2 = np.array([1.0, 2 * (k * k - 1) / a0, (1 - k / q + k * k) / a0])
+    return (b1, a1), (b2, a2)
+
+
+def level_decoder_available() -> bool:
+    """Whether anything on this machine can decode audio for measurement."""
+    for mod in ('soundfile', 'av'):
+        try:
+            __import__(mod)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _decode_for_level(path: Path) -> tuple:
+    """Decode *path* to a mono float array + samplerate (soundfile → PyAV).
+
+    Returns ``(None, 0)`` when nothing can decode it; measurement is then
+    skipped and the track plays at unity, which is what it did before
+    auto-level existed.
+    """
+    import numpy as np  # noqa: PLC0415
+    try:
+        import soundfile as sf  # noqa: PLC0415
+        data, sr = sf.read(str(path), dtype='float32', always_2d=True)
+        return data.mean(axis=1).astype(np.float64), int(sr)
+    except Exception:
+        pass
+    try:
+        import av  # noqa: PLC0415
+        chunks = []
+        with av.open(str(path)) as container:
+            stream = container.streams.audio[0]
+            resampler = av.AudioResampler(format='flt', layout='mono',
+                                          rate=48_000)
+            for frame in container.decode(stream):
+                for out in resampler.resample(frame):
+                    chunks.append(out.to_ndarray().reshape(-1))
+            for out in resampler.resample(None):
+                chunks.append(out.to_ndarray().reshape(-1))
+        if chunks:
+            return np.concatenate(chunks).astype(np.float64), 48_000
+    except Exception as exc:
+        log.debug('media-01: auto-level decode failed for %s: %s', path, exc)
+    return None, 0
+
+
+def measure_gain(path: Path) -> float | None:
+    """Loudness-normalizing gain for *path* (K-weighted, loudest half).
+
+    Per-second RMS blocks, top 50%, so long quiet intros/outros do not
+    inflate a quiet track's gain.  None when the file cannot be measured.
+    """
+    import numpy as np  # noqa: PLC0415
+    mono, sr = _decode_for_level(path)
+    if mono is None or mono.shape[0] < 4096 or sr <= 0:
+        return None
+    try:
+        from scipy.signal import lfilter  # noqa: PLC0415
+        (b1, a1), (b2, a2) = _k_weight_coeffs(float(sr))
+        weighted = lfilter(b2, a2, lfilter(b1, a1, mono))
+    except Exception:
+        weighted = mono                    # weighting optional, never fatal
+    power = np.square(weighted)
+    n = power.shape[0] // sr
+    if n >= 2:
+        blocks = power[:n * sr].reshape(n, sr).mean(axis=1)
+        loud = np.sort(blocks)[n // 2:]
+        rms = float(np.sqrt(max(1e-12, loud.mean())))
+    else:
+        rms = float(np.sqrt(max(1e-12, power.mean())))
+    return float(np.clip(_AUTOGAIN_TARGET_RMS / rms,
+                         _AUTOGAIN_MIN, _AUTOGAIN_MAX))
 
 
 _CACHE_VERSION = 1
@@ -267,6 +376,10 @@ class _VlcBackend:
                          self._instance.media_player_new()]
         self._active = 0
         self._volume = max(0, min(200, volume))
+        # Per-player auto-level gain (1.0 = unity).  Per player, not global:
+        # during a crossfade the outgoing track keeps *its* measured gain
+        # while the incoming one ramps up under its own.
+        self._gains = [1.0, 1.0]
         self._fade: list | None = None    # [elapsed_s, fade_s, outgoing idx]
         self._pending_volume = False      # apply volume once playback clock runs
         # Never set volume on a player without a live audio output: libvlc
@@ -277,8 +390,37 @@ class _VlcBackend:
     def _player(self):
         return self._players[self._active]
 
+    def _eff(self, idx: int, frac: float = 1.0) -> int:
+        """Effective VLC volume for player *idx*: user volume x its
+        auto-level gain x a fade fraction, clamped to VLC's 0-200."""
+        return int(max(0.0, min(200.0,
+                                self._volume * self._gains[idx] * frac)))
+
+    def set_track_gain(self, gain: float) -> None:
+        """Auto-level: set the ACTIVE player's loudness gain.
+
+        Called by the controller when a track starts (cached measurement) or
+        when a background measurement lands mid-track.  Applied through the
+        same deferred path as volume, so it can never race the audio output
+        into the pw_thread_loop_lock crash."""
+        try:
+            g = float(gain)
+        except (TypeError, ValueError):
+            g = 1.0
+        self._gains[self._active] = max(0.1, min(4.0, g))
+        if self._fade is not None:
+            return                        # tick()'s ramp re-applies it
+        try:
+            if self._player.get_time() > 0:
+                self._player.audio_set_volume(self._eff(self._active))
+            else:
+                self._pending_volume = True
+        except Exception:
+            self._pending_volume = True
+
     def play(self, path: Path) -> None:
         self._end_fade(hard=True)
+        self._gains[self._active] = 1.0   # new track: unity until measured
         media = self._instance.media_new(str(path))
         self._player.set_media(media)
         self._player.play()
@@ -306,6 +448,7 @@ class _VlcBackend:
                 pass
             self._end_fade(hard=True)     # collapse any fade already running
             self._active = 1 - out_idx
+            self._gains[self._active] = 1.0   # unity until measured
             self._fade = [0.0, max(0.2, float(fade_s)), out_idx]
             return True
         except Exception:
@@ -316,7 +459,7 @@ class _VlcBackend:
         if self._pending_volume:
             try:
                 if self._player.get_time() > 0:   # audio output is live now
-                    self._player.audio_set_volume(self._volume)
+                    self._player.audio_set_volume(self._eff(self._active))
                     self._pending_volume = False
             except Exception:
                 self._pending_volume = False
@@ -325,8 +468,9 @@ class _VlcBackend:
         self._fade[0] += max(0.0, float(dt))
         t = min(1.0, self._fade[0] / self._fade[1])
         out_idx = self._fade[2]
-        self._players[self._active].audio_set_volume(int(self._volume * t))
-        self._players[out_idx].audio_set_volume(int(self._volume * (1.0 - t)))
+        self._players[self._active].audio_set_volume(
+            self._eff(self._active, t))
+        self._players[out_idx].audio_set_volume(self._eff(out_idx, 1.0 - t))
         if t >= 1.0:
             self._end_fade()
 
@@ -337,9 +481,10 @@ class _VlcBackend:
         self._fade = None
         try:
             self._players[out_idx].stop()
-            self._players[out_idx].audio_set_volume(self._volume)
+            self._players[out_idx].audio_set_volume(self._eff(out_idx))
             if hard:
-                self._players[self._active].audio_set_volume(self._volume)
+                self._players[self._active].audio_set_volume(
+                    self._eff(self._active))
         except Exception:
             pass
 
@@ -378,7 +523,7 @@ class _VlcBackend:
             return
         try:
             if self._player.get_time() > 0:
-                self._player.audio_set_volume(self._volume)
+                self._player.audio_set_volume(self._eff(self._active))
             else:
                 self._pending_volume = True
         except Exception:
@@ -733,10 +878,21 @@ class MediaController:
         # shuffle (fixed 2026-09-02; the old check stopped a 10k library after
         # a handful of tracks).  See _view_exhausted() / _next_unplayed().
         self._played: set[int] = set()
+        # Up-next queue: a literal FIFO of library indices, independent of
+        # mode/shuffle/sort/crate.  Right-click "Add to queue" on any track
+        # list appends here; the next forward advance (Next, a crossfade
+        # trigger, or the track just ending) always drains this first, so
+        # "up next" means the same thing wherever the track was queued from.
+        # Not persisted -- a queue is a session thing, like a DJ's next-up.
+        self._queue: list[int] = []
         # Crossfade between tracks (VLC backend: true overlapping fade).
         self.crossfade_enabled = bool(self._cfg.get('crossfade', True))
         self._crossfade_s = max(0.5, float(
             self._cfg.get('crossfade_ms', 3000) or 3000) / 1000.0)
+        # Auto-level: loudness-match tracks the way the mixer's decks do
+        # (K-weighted loudest-half RMS -> clamped gain).  Measured once per
+        # track on a background thread, cached in the playlists store.
+        self.auto_level_enabled = bool(self._cfg.get('auto_level', True))
         self._end_handled = False    # early-fade fired for the current track
         self._restore_prefs()        # remembered prefs override the defaults
         # The corner platter ('Now Spinning') is core now — the checkbox
@@ -841,6 +997,8 @@ class MediaController:
             self._shuffle = bool(p['shuffle'])
         if 'crossfade' in p:
             self.crossfade_enabled = bool(p['crossfade'])
+        if 'auto_level' in p:
+            self.auto_level_enabled = bool(p['auto_level'])
         if 'volume' in p:
             self.set_volume(int(p['volume']))
         if p.get('mode') in ('library', 'playlists', 'favorites', 'recent'):
@@ -861,6 +1019,7 @@ class MediaController:
             'repeat': self.repeat,
             'shuffle': self._shuffle,
             'crossfade': self.crossfade_enabled,
+            'auto_level': self.auto_level_enabled,
             'volume': self._volume,
             'mode': self.mode,
             'active_playlist': self.active_playlist,
@@ -876,6 +1035,69 @@ class MediaController:
         self.crossfade_enabled = not self.crossfade_enabled
         return ('Media: crossfade on' if self.crossfade_enabled
                 else 'Media: crossfade off')
+
+    # -- auto-level ------------------------------------------------------------
+
+    @property
+    def can_auto_level(self) -> bool:
+        """Auto-level needs a gain-capable backend and a decoder to measure."""
+        return (hasattr(self._backend, 'set_track_gain')
+                and level_decoder_available())
+
+    def toggle_auto_level(self) -> str:
+        self.auto_level_enabled = not self.auto_level_enabled
+        setg = getattr(self._backend, 'set_track_gain', None)
+        if callable(setg):
+            if not self.auto_level_enabled:
+                setg(1.0)                        # back to unity, audibly now
+            else:
+                self._apply_auto_level(self.snapshot_path_at(self._index))
+        return ('Media: auto-level on' if self.auto_level_enabled
+                else 'Media: auto-level off')
+
+    def _apply_auto_level(self, path: str | None) -> None:
+        """Level the track that just started: cached gain now, else measure.
+
+        The measurement decodes the whole file, so it runs on a daemon
+        thread; the result is applied only if that track is still the one
+        playing (a skip mid-measure must not re-level the next tune), and is
+        cached in the playlists store either way so each file is measured
+        once, ever.
+        """
+        setg = getattr(self._backend, 'set_track_gain', None)
+        if (not path or not callable(setg) or not self.auto_level_enabled
+                or not level_decoder_available()):
+            return
+        store = self._playlists
+        cached = store.gain_for(path) if store is not None \
+            and hasattr(store, 'gain_for') else None
+        if cached is not None:
+            setg(cached)
+            return
+        token = self._track_id                   # who the result belongs to
+
+        def _measure() -> None:
+            try:
+                gain = measure_gain(Path(path))
+            except Exception as exc:             # pragma: no cover - defensive
+                log.debug('media-01: auto-level failed for %s: %s', path, exc)
+                gain = None
+            if gain is None:
+                return
+            if store is not None and hasattr(store, 'remember_gain'):
+                try:
+                    store.remember_gain(path, gain)
+                except Exception:
+                    pass
+            if (self._track_id == token and self.auto_level_enabled
+                    and callable(getattr(self._backend, 'set_track_gain',
+                                         None))):
+                self._backend.set_track_gain(gain)
+                log.info('media-01: auto-level %.2fx for %s',
+                         gain, Path(path).name)
+
+        threading.Thread(target=_measure, daemon=True,
+                         name='media-autolevel').start()
 
     def cycle_repeat(self) -> str:
         """Loop button: cycle repeat ALL -> ONE -> OFF (playback wrap mode)."""
@@ -923,6 +1145,44 @@ class MediaController:
     @property
     def library_index(self) -> int:
         return self._index
+
+    # -- up-next queue -----------------------------------------------------
+
+    def queue_add(self, index: int) -> str:
+        """Queue library row *index* to play next (FIFO, mode-independent).
+
+        Just an append to the array: the next forward advance drains the
+        front of :attr:`_queue` before it ever consults the active view's
+        order, shuffle bag, or sort -- so this is the one control that means
+        "play this next" the same way from the library, a playlist,
+        favorites, or recent.
+        """
+        if not (0 <= index < len(self._library)):
+            return 'Media: nothing to queue'
+        self._queue.append(index)
+        names = self.library_names()
+        name = names[index] if index < len(names) else 'track'
+        return f'Media: queued {name} (#{len(self._queue)} up next)'
+
+    def dequeue(self, position: int) -> bool:
+        """Remove the up-next entry at *position* (0 = playing next)."""
+        if 0 <= position < len(self._queue):
+            self._queue.pop(position)
+            return True
+        return False
+
+    def clear_queue(self) -> None:
+        self._queue = []
+
+    @property
+    def queue_len(self) -> int:
+        return len(self._queue)
+
+    def queue_preview(self, n: int = 3) -> list[str]:
+        """Display names for the first *n* queued tracks, in play order."""
+        names = self.library_names()
+        return [names[i] if 0 <= i < len(names) else '(missing)'
+                for i in self._queue[:max(0, n)]]
 
     def library_names(self) -> list[str]:
         """Display names ('Artist - Title' or stem) for the browser list."""
@@ -1554,7 +1814,22 @@ class MediaController:
         return None
 
     def _advance(self, delta: int) -> None:
-        """Move within the active view (auto-advance / next / prev)."""
+        """Move within the active view (auto-advance / next / prev).
+
+        The up-next queue always wins on a forward move: it is a promise
+        made by right-clicking a specific track, and the view's own order
+        (crate, sort, shuffle bag) is what plays once that promise is kept.
+        Backward (prev) never touches the queue -- stepping back should not
+        consume something waiting to play forward.
+        """
+        if delta > 0:
+            while self._queue:
+                nxt = self._queue.pop(0)
+                if 0 <= nxt < len(self._library):
+                    self._start_track(nxt)
+                    return
+                # A queued track that vanished from the library (deleted,
+                # rescanned away): skip it silently and try the next one.
         view = self.view_indices()
         if not view:
             return
@@ -1791,6 +2066,8 @@ class MediaController:
             'ambience': self.ambience_enabled,
             'crossfade': self.crossfade_enabled,
             'can_crossfade': self.can_crossfade,
+            'auto_level': self.auto_level_enabled,
+            'can_auto_level': self.can_auto_level,
             'keep_playing_on_close': self.keep_playing_on_close,
         }
 
@@ -1833,6 +2110,10 @@ class MediaController:
         self._end_handled = False
         self._is_playing = True
         self._status = 'playing'
+        try:                               # loudness-match the fresh track
+            self._apply_auto_level(str(path))
+        except Exception as exc:           # pragma: no cover - defensive
+            log.debug('media-01: auto-level skipped: %s', exc)
 
         if self._playlists is not None:
             try:                           # recently-played, newest first

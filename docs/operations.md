@@ -65,11 +65,49 @@ rows, transport, tabs, crates — raises a tooltip through the core tooltip
 system; a row's tooltip is its full tag card (artist / album / genre / year /
 length / crate).
 
+**Right-click any row, in any of the four views, for Add to queue** — a
+literal FIFO of library indices, so it means the same thing everywhere: the
+next forward advance (Next, a crossfade trigger, or the track ending)
+always plays the front of the queue before it consults the active view's
+own order, shuffle bag, or sort.  A pink `▶ N queued` badge appears in the
+header only while something is actually queued (hover it for a preview of
+what's coming, click to clear it).  Stepping backward never touches the
+queue.
+
+### Navigation (0.27.0)
+
+The mouse wheel scrolls the **view**, 3 rows per notch (not the selection,
+and not 1 row per notch as before) — over the track list, the folder/
+playlist split pane, an open flyout, or a long context menu, whichever is
+under the pointer.  PgUp/PgDn/Home/End join the existing arrow+Enter
+keyboard nav.  Every scrollbar — the track list, the folder/playlist pane,
+flyouts — is a draggable thumb, not a static hint: press and drag it, or
+press-and-drag the seek bar / volume slider the same way.  The sort flyout,
+filter panel, playlist picker, and every right-click menu (including "Add
+to playlist »" over a large collection) cap their height to the window and
+scroll within it, so nothing runs off the bottom unreachable regardless of
+how many playlists, filter values, or menu items there are.
+
+### The platter's chrome (0.24.0–0.27.0)
+
 While music plays, the platter is fed by the app's own audio analyzer: the
 glow breathes with bass, a rim ring flashes on the beat, treble drives the
-sparkles, and a radial spectrum ring orbits the record.  Levels are captured
-only while the deck window is open; on a core without audio levels the
-platter falls back to its old purely time-driven look.
+sparkles, and a radial spectrum ring orbits the record.  The two flanking
+strips beside the round platter — otherwise flat panel colour — carry a
+small mirrored EQ built from the same 16-band spectrum plus a slow drift of
+beat-reactive sparks.  Levels are captured only while the deck window is
+open; on a core without audio levels the platter and flanks fall back to
+their old purely time-driven look.
+
+### Auto-level (0.27.0)
+
+A checkbox next to crossfade loudness-matches tracks the way the mixer's
+decks do: K-weighted RMS (ITU-R BS.1770) over the loudest half of the
+track, normalized and clamped.  Measured once per track on a background
+thread — never blocks playback — and cached in the playlists store, so a
+file is only ever decoded for this once.  Needs a gain-capable backend
+(VLC) and a decoder (`soundfile` or `av`) to measure with; the checkbox
+reads "(needs VLC)" and stays informational otherwise.  On by default.
 
 ## Now-playing display priority
 

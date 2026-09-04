@@ -2,7 +2,7 @@
 
 Owner: Drop-in Maintainers
 Status: active
-Last updated: 2026-08-15
+Last updated: 2026-09-03
 
 Keys live under `[media]` in `config.toml`, which already ships a
 commented-out `[media]` block — uncomment and adjust to enable the drop-in
@@ -23,6 +23,7 @@ flagged at startup.
 | `now_playing_banner_hold_s` | float | `10.0` | Seconds the banner stays visible, floor `1.0` |
 | `now_playing_banner_delay_s` | float | `2.0` | Delay after a track starts before the banner fires, floor `0.0` |
 | `crossfade_ms` | int | `3000` | Length of the overlapping crossfade between tracks (VLC backend; real since 0.12.0). The `crossfade` bool (default `true`) toggles it; the Deck window has a checkbox for both |
+| `auto_level` | bool | `true` | Loudness-match tracks the way the mixer's decks do (K-weighted RMS, clamped gain), measured once per track and cached. Needs the VLC backend and a decoder (`soundfile` or `av`); the Deck checkbox reads "(needs VLC)" and stays informational otherwise |
 
 ## Supported audio formats
 

@@ -1,9 +1,9 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.26.0
+Version: 0.27.0
 Status: beta
-Last updated: 2026-09-01
+Last updated: 2026-09-03
 
 `media-01` is a local audio playback subsystem for unicorn-viz.  It scans a
 directory of audio files, reads ID3/Vorbis/FLAC tags via `mutagen`, and plays
@@ -17,10 +17,15 @@ in the exact same format as the Spotify drop-in — no visual changes.
 - **Full tag support** — ID3v2, Vorbis comments, FLAC, AAC/MP4, WMA via mutagen
   (title / artist / album / genre / year)
 - **Media Deck window** (`Shift+L`) — the mixer board's single-deck sibling:
-  audio-reactive neon platter with a live spectrum ring, library browser with
-  crates, faceted filters (artist / album / genre / decade), search,
-  playlists / favorites / recent views, hover tooltips on everything, and
-  in-place playlist management (rename / duplicate / prune / delete)
+  audio-reactive neon platter with a live spectrum ring and mirrored EQ
+  flanks, library browser with crates, faceted filters (artist / album /
+  genre / decade), search, playlists / favorites / recent views, an up-next
+  queue, hover tooltips on everything, real desktop-speed scrolling with
+  draggable scrollbars everywhere, and in-place playlist management
+  (rename / duplicate / prune / delete)
+- **Auto-level** — loudness-matches tracks the way the mixer's decks do
+  (K-weighted RMS over the loudest half, clamped gain, measured once per
+  track and cached); on by default, one checkbox to turn it off
 - **Supported formats** — mp3, flac, ogg, opus, wav, aiff, m4a, aac, wma, ape, wv
 - **Cross-platform playback** — python-vlc (libvlc) on Linux, Windows, macOS
 - **Fallback chain** — mpv → ffplay when VLC is unavailable
@@ -91,6 +96,52 @@ Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
 
+- **0.27.0** — **Navigation sophistication + a full visual pass.** Owner
+  feedback: the Deck was "still super boring and bland" and its dropdowns
+  "extend off screen... and don't scroll" while in-browser lists "scroll too
+  slow." Fixed both:
+  - **Real navigation.** The wheel now scrolls the *view* (3 rows/notch,
+    matching normal desktop feel) instead of walking the selection one row
+    at a time; PgUp/PgDn/Home/End join arrows + Enter. Every scrollbar
+    (track list, folder/playlist split pane, flyouts) is a **draggable neon
+    thumb**, not a static hint. The sort flyout, filter panel, playlist
+    picker, and every right-click context menu (including "Add to
+    playlist »" over a big collection) now **cap to the window and scroll
+    within it** — previously a picker or menu taller than the window simply
+    ran off the bottom with the tail unreachable.
+  - **The glam pass.** A numpy-built, cached vertical navy gradient +
+    scanline base coat; a two-tone glowing wordmark (cyan → pink) with a
+    beat-tinted light sweep under the header rule; a live status chip with
+    a pulsing dot; floating drop-shadowed rounded panels throughout; a
+    gradient (cyan→pink) progress bar with a glowing playhead bead; rounded
+    hover-reactive transport buttons, tabs, and flyout rows; a gradient
+    volume fill that turns gold past unity; zebra-striped list rows.
+  - **Auto-level**: a new checkbox (mixer methodology, its own section
+    below) next to crossfade.
+  - **Up-next queue**: right-click any track in any list (library,
+    playlist, favorites, recent) → **Add to queue** — a literal FIFO of
+    library indices, so "play this next" means the same thing everywhere
+    and wins over shuffle/sort/crate on the next forward advance. A pink
+    "▶ N queued" badge appears in the header (hover for a preview, click to
+    clear) only when something actually is.
+  - **The platter's flanks come alive.** A round platter in a rectangular
+    pane leaves two dead strips of flat panel colour beside it; each now
+    carries a small mirrored EQ (built from the app's own 16-band spectrum)
+    and a slow drift of rising sparks that pop on the beat — filling the
+    "big empty space" the owner flagged, in the same visual language as
+    the platter's own spectrum ring.
+  - Auto-level itself: loudness-matches tracks the way the mixer's decks
+    do — K-weighted RMS (ITU-R BS.1770) over the loudest half of the
+    track, normalized to the mixer's target and clamped
+    (`_AUTOGAIN_MIN`/`_AUTOGAIN_MAX`, kept in step with dj-mixer-01's
+    `deck.py` per that module's own docstring). Measured once per track on
+    a background thread (never blocks playback), cached in the playlists
+    store (`gains`) so a file is measured once, ever; a stale in-flight
+    measurement is discarded if the track moved on before it finished
+    (never re-levels the wrong track). Per-VLC-player gain (not global),
+    so a crossfading pair keeps each side's own measured level through the
+    ramp. On by default; the checkbox needs VLC (a gain-capable backend)
+    and a decoder (`soundfile` or `av`) to measure with.
 - **0.26.0** — Publishes the playing track's authored BPM tag (ID3 TBPM /
   Vorbis `bpm`) on the vj_api BPM bus as source `media`, read once per
   track and republished every frame while playing. Auto VJ primes its

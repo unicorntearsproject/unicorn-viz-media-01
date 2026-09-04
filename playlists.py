@@ -33,6 +33,9 @@ class MediaPlaylists:
         self.prefs: dict = {}                # repeat/shuffle/volume/mode/...
         self.favorites: set[str] = set()     # favorited track paths
         self.recent: list[str] = []          # recently-played paths, newest first
+        # Measured loudness gains (auto-level), path -> float.  A cache, not
+        # user data: losing it only means re-measuring on next play.
+        self.gains: dict[str, float] = {}
         self._load()
 
     # -- playlists -------------------------------------------------------------
@@ -180,6 +183,24 @@ class MediaPlaylists:
         self.save()
         return len(dead)
 
+    # -- auto-level gain cache ---------------------------------------------------
+
+    def gain_for(self, path: str) -> float | None:
+        """Cached loudness gain for *path*, or None when never measured."""
+        v = self.gains.get(str(path))
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def remember_gain(self, path: str, gain: float) -> None:
+        """Cache a measured loudness gain (measurement costs a full decode)."""
+        try:
+            self.gains[str(path)] = round(float(gain), 4)
+        except (TypeError, ValueError):
+            return
+        self.save()
+
     # -- recently played --------------------------------------------------------
 
     _RECENT_CAP = 50
@@ -240,6 +261,13 @@ class MediaPlaylists:
             self.prefs = dict(data.get('prefs') or {})
             self.favorites = {str(f) for f in (data.get('favorites') or [])}
             self.recent = [str(r) for r in (data.get('recent') or [])]
+            raw_g = data.get('gains') or {}
+            self.gains = {}
+            for k, v in raw_g.items() if isinstance(raw_g, dict) else ():
+                try:
+                    self.gains[str(k)] = float(v)
+                except (TypeError, ValueError):
+                    continue
             log.info('media playlists: %d list(s), %d crate(s) excluded',
                      len(self._lists), len(self.excluded))
         except Exception as exc:
@@ -272,7 +300,8 @@ class MediaPlaylists:
                    'last_bucket': self.last_bucket,
                    'prefs': dict(self.prefs),
                    'favorites': sorted(self.favorites),
-                   'recent': list(self.recent)}
+                   'recent': list(self.recent),
+                   'gains': dict(self.gains)}
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(dir=str(self._path.parent),
