@@ -2,7 +2,7 @@
 
 Owner: Drop-in Maintainers
 Status: active
-Last updated: 2026-08-15
+Last updated: 2026-09-04
 
 ## Purpose
 
@@ -88,16 +88,43 @@ to playlist »" over a large collection) cap their height to the window and
 scroll within it, so nothing runs off the bottom unreachable regardless of
 how many playlists, filter values, or menu items there are.
 
-### The platter's chrome (0.24.0–0.27.0)
+### The platter's chrome (0.24.0–0.28.0)
 
 While music plays, the platter is fed by the app's own audio analyzer: the
 glow breathes with bass, a rim ring flashes on the beat, treble drives the
-sparkles, and a radial spectrum ring orbits the record.  The two flanking
-strips beside the round platter — otherwise flat panel colour — carry a
-small mirrored EQ built from the same 16-band spectrum plus a slow drift of
-beat-reactive sparks.  Levels are captured only while the deck window is
-open; on a core without audio levels the platter and flanks fall back to
-their old purely time-driven look.
+sparkles, and a radial spectrum ring orbits the record — all from a full
+**64-band FFT** (`audio_spectrum`; the pre-0.28.0 build folded this down to
+16 bands). The two flanking strips beside the round platter carry a slow
+drift of beat-reactive sparks (the bar meters that used to live there moved
+to the strip below, see next). Levels are captured only while the deck
+window is open; on a core without audio levels the platter and flanks fall
+back to their old purely time-driven look.
+
+### The spectrum strip (0.28.0)
+
+A full-width analyzer strip fills the gap between the transport and the
+settings stack — the space the platter's own flanking bars were previously
+and wrongly trying to occupy. One bar per band of the same 64-band FFT the
+platter's ring reads, each with a cyan-to-pink-to-yellow gradient (hotter
+at the tip, the louder that band is), a peak-hold cap that **drips down
+slower than the bar itself falls**, a soft neon glow, and a fading
+reflection below the baseline. A beat-reactive scanline sweeps the strip on
+the kick. Idle (nothing playing) keeps a slow breathing pattern instead of
+going flat and dark.
+
+### SPARKLE (0.28.0)
+
+A slider next to the settings checkboxes controls the intensity of the
+deck's purely decorative twinkle layer — the platter's orbiting glints, the
+flanking sparks, and the spectrum strip's flecks. 0 leaves the bars, rings,
+and glow completely alone; only the twinkle goes dark. This is a **local**
+control: nothing global exists anywhere in the codebase to hook into (the
+DJ mixer has its own private SPARKLE gain, same idea, not shared), so this
+mirrors that pattern rather than inventing a cross-drop-in setting. Set via
+the slider (drag, or click to jump) or the `[media] sparkle_gain` config
+key; persisted in session prefs either way. On a window too short to fit
+it, the slider omits itself — same graceful-degradation pattern as the
+spectrum strip and the folder/flyout panes.
 
 ### Auto-level (0.27.0)
 

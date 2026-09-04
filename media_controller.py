@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.27.0'
+__version__ = '0.28.0'
 
 import json
 import logging
@@ -893,6 +893,14 @@ class MediaController:
         # (K-weighted loudest-half RMS -> clamped gain).  Measured once per
         # track on a background thread, cached in the playlists store.
         self.auto_level_enabled = bool(self._cfg.get('auto_level', True))
+        # Sparkle intensity for the deck's decorative glints -- the platter's
+        # orbiting sparkle, the flanking sparks, and the spectrum strip's
+        # flecks.  A local slider, not a shared one: the mixer's own SPARKLE
+        # knob (dj-mixer-01/ui.py) is private to that window too, and no
+        # global equivalent exists anywhere in core to hook into.  0 = the
+        # bars/rings/platter stay, only the twinkle layer goes dark.
+        self._sparkle_gain = max(0.0, min(1.0,
+            float(self._cfg.get('sparkle_gain', 1.0) or 0.0)))
         self._end_handled = False    # early-fade fired for the current track
         self._restore_prefs()        # remembered prefs override the defaults
         # The corner platter ('Now Spinning') is core now — the checkbox
@@ -999,6 +1007,8 @@ class MediaController:
             self.crossfade_enabled = bool(p['crossfade'])
         if 'auto_level' in p:
             self.auto_level_enabled = bool(p['auto_level'])
+        if 'sparkle_gain' in p:
+            self.set_sparkle_gain(p['sparkle_gain'])
         if 'volume' in p:
             self.set_volume(int(p['volume']))
         if p.get('mode') in ('library', 'playlists', 'favorites', 'recent'):
@@ -1020,6 +1030,7 @@ class MediaController:
             'shuffle': self._shuffle,
             'crossfade': self.crossfade_enabled,
             'auto_level': self.auto_level_enabled,
+            'sparkle_gain': self._sparkle_gain,
             'volume': self._volume,
             'mode': self.mode,
             'active_playlist': self.active_playlist,
@@ -1035,6 +1046,18 @@ class MediaController:
         self.crossfade_enabled = not self.crossfade_enabled
         return ('Media: crossfade on' if self.crossfade_enabled
                 else 'Media: crossfade off')
+
+    # -- sparkle intensity (deck chrome only; see the __init__ comment) --------
+
+    @property
+    def sparkle_gain(self) -> float:
+        return self._sparkle_gain
+
+    def set_sparkle_gain(self, value: float) -> None:
+        try:
+            self._sparkle_gain = max(0.0, min(1.0, float(value)))
+        except (TypeError, ValueError):
+            pass
 
     # -- auto-level ------------------------------------------------------------
 
@@ -1326,13 +1349,20 @@ class MediaController:
         self._publish_track_path()
         self._publish_track_bpm()
 
+    # 64 bands: the analyzer -> deck-chrome data path. 512 raw FFT bins
+    # folded down 8:1, which is enough resolution for a real bar-by-bar
+    # spectrum strip (the previous 16-band fold was sized for a ring of
+    # chunky bars only; the strip needs more bars than that to read as an
+    # analyzer instead of a decoration).
+    _SPECTRUM_BANDS = 64
+
     def _capture_audio_levels(self, audio: Any) -> None:
         """Mirror the app's live audio analysis for the Media Deck's chrome.
 
-        Only while the deck window is open -- the platter glow, beat flash and
-        spectrum ring are the sole consumers, so with the window closed this
-        is pure waste.  Whole-tuple assignment keeps the render thread's reads
-        tear-free without a lock.
+        Only while the deck window is open -- the platter glow, beat flash,
+        spectrum ring, and spectrum strip are the sole consumers, so with the
+        window closed this is pure waste.  Whole-tuple assignment keeps the
+        render thread's reads tear-free without a lock.
         """
         if self._window is None or audio is None:
             return
@@ -1345,9 +1375,8 @@ class MediaController:
             )
             fft = getattr(audio, 'fft', None)
             if fft is not None and len(fft) >= 512:
-                # 512 smoothed bands folded to 16 -- coarse on purpose: the
-                # deck draws a ring of chunky bars, not an analyzer.
-                bands = fft[:512].reshape(16, 32).mean(axis=1)
+                n = self._SPECTRUM_BANDS
+                bands = fft[:512].reshape(n, 512 // n).mean(axis=1)
                 self.audio_spectrum = tuple(
                     min(1.0, max(0.0, float(v))) for v in bands)
         except Exception:                  # never let chrome break playback
@@ -2068,6 +2097,7 @@ class MediaController:
             'can_crossfade': self.can_crossfade,
             'auto_level': self.auto_level_enabled,
             'can_auto_level': self.can_auto_level,
+            'sparkle_gain': self._sparkle_gain,
             'keep_playing_on_close': self.keep_playing_on_close,
         }
 

@@ -1,9 +1,9 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.27.0
+Version: 0.28.0
 Status: beta
-Last updated: 2026-09-03
+Last updated: 2026-09-04
 
 `media-01` is a local audio playback subsystem for unicorn-viz.  It scans a
 directory of audio files, reads ID3/Vorbis/FLAC tags via `mutagen`, and plays
@@ -17,12 +17,14 @@ in the exact same format as the Spotify drop-in — no visual changes.
 - **Full tag support** — ID3v2, Vorbis comments, FLAC, AAC/MP4, WMA via mutagen
   (title / artist / album / genre / year)
 - **Media Deck window** (`Shift+L`) — the mixer board's single-deck sibling:
-  audio-reactive neon platter with a live spectrum ring and mirrored EQ
-  flanks, library browser with crates, faceted filters (artist / album /
-  genre / decade), search, playlists / favorites / recent views, an up-next
-  queue, hover tooltips on everything, real desktop-speed scrolling with
-  draggable scrollbars everywhere, and in-place playlist management
-  (rename / duplicate / prune / delete)
+  audio-reactive neon platter with a live spectrum ring, a full-width
+  64-band spectrum strip with dripping peak-holds under the transport, a
+  SPARKLE knob for the decorative twinkle layer, library browser with
+  crates, faceted filters (artist / album / genre / decade), search,
+  playlists / favorites / recent views, an up-next queue, hover tooltips
+  on everything, real desktop-speed scrolling with draggable scrollbars
+  everywhere, and in-place playlist management (rename / duplicate /
+  prune / delete)
 - **Auto-level** — loudness-matches tracks the way the mixer's decks do
   (K-weighted RMS over the loudest half, clamped gain, measured once per
   track and cached); on by default, one checkbox to turn it off
@@ -96,6 +98,50 @@ Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
 
+- **0.28.0** — **The spectrum visualization moves, gets the full FFT, and
+  gets a lot more dramatic — plus a SPARKLE knob.** Owner feedback on the
+  0.27.0 pass: the flanking EQ bars beside the platter were "in the wrong
+  spot," should "make sure you're using the full 64 band fft," should be
+  "neon face melting drip baby," and should "respect the global sparkle
+  setting."
+  - **Relocated**: the old flanking bar meters (beside the platter, never
+    wide enough to read as a real analyzer) are gone; a full-width
+    **spectrum strip** now fills the previously dead gap between the
+    transport and the settings stack.
+  - **Full 64-band FFT**: `audio_spectrum` no longer folds the analyzer's
+    512 bins down to 16 — it's 64 bands now (`MediaController._SPECTRUM_BANDS`),
+    one bar per band, no averaging beyond the raw 8:1 fold every band already
+    needs. The platter's own radial spectrum ring reads the same data, so it
+    got sharper for free.
+  - **Neon drip**: each bar is a short vertical gradient (cyan base, hot
+    pink/yellow tip, matching how loud that band is), with a soft glow, a
+    **peak-hold cap that drips down slower than the bar itself falls** (the
+    read of "analyzer" over "bar graph"), and a fading reflection below the
+    baseline. A beat-reactive scanline sweeps the strip on the kick.
+  - **A local SPARKLE knob.** No global sparkle setting exists anywhere in
+    the codebase (checked core `vj_api`, `config.toml`, `overlays.py`) — the
+    only precedent is the DJ mixer's own *private* SPARKLE gain, so this
+    mirrors that: a slider next to the settings checkboxes (`sparkle_gain`,
+    0–1, default 1.0, persisted, also settable via the new `[media]
+    sparkle_gain` config key) governing only the decorative twinkle layer —
+    the platter's orbiting glints, the flanking sparks left beside the
+    platter, and the strip's sparkle flecks. 0 leaves the bars, rings, and
+    glow untouched and just kills the twinkle.
+  - The platter shrank slightly again (0.46 → 0.40 of the pane height) so
+    the strip gets real room at the application's actual default window
+    size (980×640), not only in a manually-resized taller window — the
+    previous pass looked great at ~1125×1015 and was a barely-visible
+    sliver at the shipped default. Both the strip and the SPARKLE slider
+    skip themselves gracefully (no crash, no overlap) on a window too short
+    for either, the same degradation pattern the rest of the deck already
+    follows.
+  - Fixed along the way: the SPARKLE slider's first implementation
+    positioned itself at a fixed offset from the window's bottom edge,
+    independent of the checkbox stack above it — on a short window where
+    the stack's own row spacing compresses, the two collided. Caught by
+    eye in a screenshot, then pinned with a direct regression test
+    (`test_footer_controls_never_overlap_across_window_heights`) sweeping
+    a range of window heights, so it can't come back silently.
 - **0.27.0** — **Navigation sophistication + a full visual pass.** Owner
   feedback: the Deck was "still super boring and bland" and its dropdowns
   "extend off screen... and don't scroll" while in-browser lists "scroll too

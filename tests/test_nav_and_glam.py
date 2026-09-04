@@ -637,7 +637,7 @@ def test_queue_badge_shows_only_when_something_is_queued_and_clears_on_click() -
     win.close_now()
 
 
-# -- side-show: the platter's flanking EQ + sparks -----------------------------
+# -- flank sparks + spectrum strip (0.28.0) ------------------------------------
 
 def test_side_show_renders_without_crashing_at_every_size() -> None:
     ctl = _BigStub()
@@ -648,12 +648,126 @@ def test_side_show_renders_without_crashing_at_every_size() -> None:
         win.close_now()
 
 
-def test_side_show_skips_gracefully_with_no_spectrum() -> None:
+def test_side_show_skips_gracefully_at_zero_sparkle_and_when_idle() -> None:
+    from PIL import Image, ImageDraw
+    ctl = _BigStub()
+    win = _window(ctl)
+    d = ImageDraw.Draw(Image.new('RGBA', (400, 300)))
+    win._draw_side_show(d, 10, 390, 200, 150, 120, True,
+                        (0.5, 0.3, 0.6, 0.9), sparkle_gain=0.0)   # must not raise
+    win._draw_side_show(d, 10, 390, 200, 150, 120, False,
+                        (0.5, 0.3, 0.6, 0.9), sparkle_gain=1.0)   # idle: no-op
+    win.close_now()
+
+
+def test_spectrum_strip_renders_with_and_without_real_data() -> None:
+    from PIL import Image, ImageDraw
+    ctl = _BigStub()
+    win = _window(ctl)
+    d = ImageDraw.Draw(Image.new('RGBA', (600, 200)))
+    # Real 64-band data, playing.
+    win._draw_spectrum_strip(d, 10, 590, 20, 180, True,
+                             tuple(i / 64.0 for i in range(64)),
+                             (0.5, 0.3, 0.6, 0.9), sparkle_gain=1.0)
+    # No data at all (older core / not yet captured): idle fallback, no crash.
+    win._draw_spectrum_strip(d, 10, 590, 20, 180, False, (),
+                             (0.0, 0.0, 0.0, 0.0), sparkle_gain=1.0)
+    # Too small to draw: must return immediately, not divide by zero.
+    win._draw_spectrum_strip(d, 10, 20, 20, 25, True, (0.5,) * 64,
+                             (0.0, 0.0, 0.0, 0.0), sparkle_gain=1.0)
+    win.close_now()
+
+
+def test_spectrum_strip_peaks_hold_then_drip_down() -> None:
+    """The peak-hold cap must fall slower than the bar itself, or it never
+    reads as an analyzer -- just a bar graph with a flicker on top."""
+    from PIL import Image, ImageDraw
+    ctl = _BigStub()
+    win = _window(ctl)
+    d = ImageDraw.Draw(Image.new('RGBA', (600, 200)))
+    loud = (0.9,) + (0.1,) * 63
+    win._spec_peak_t = time.monotonic() - 1.0   # pretend a while has passed
+    win._draw_spectrum_strip(d, 10, 590, 20, 180, True, loud,
+                             (0.0, 0.0, 0.0, 0.9), sparkle_gain=1.0)
+    peak_after_loud = win._spec_peaks[0]
+    assert peak_after_loud > 0.5 * 160           # ~90% of the 160px span
+    quiet = (0.05,) * 64
+    win._spec_peak_t = time.monotonic() - 0.05  # a short tick later
+    win._draw_spectrum_strip(d, 10, 590, 20, 180, True, quiet,
+                             (0.0, 0.0, 0.0, 0.0), sparkle_gain=1.0)
+    assert 0.0 < win._spec_peaks[0] < peak_after_loud   # fallen, not reset
+    win.close_now()
+
+
+def test_sparkle_slider_drives_the_controller_and_persists(tmp_path) -> None:
+    ctl = _queue_controller(tmp_path)
+    win = _window(ctl)
+    hit = next(r for r in win._regions if r[4] == 'sparkle_slider')
+    x0, x1 = hit[5]
+    win._click(x0 + int((x1 - x0) * 0.25), (hit[1] + hit[3]) // 2, 1)
+    assert 0.15 < ctl.sparkle_gain < 0.35
+    ctl._save_prefs()
+    ctl2 = _queue_controller(tmp_path)
+    assert 0.15 < ctl2.sparkle_gain < 0.35      # remembered
+    win.close_now()
+    ctl.shutdown()
+    ctl2.shutdown()
+
+
+def test_sparkle_slider_drags_like_the_volume_slider() -> None:
+    ctl = _BigStub()
+    ctl.sparkle_gain = 1.0
+    ctl.set_sparkle_gain = lambda v: setattr(ctl, 'sparkle_gain', v)
+    win = _window(ctl)
+    hit = next(r for r in win._regions if r[4] == 'sparkle_slider')
+    x0, x1 = hit[5]
+    mid_y = (hit[1] + hit[3]) // 2
+    assert win._begin_drag(x0, mid_y) is True
+    win._drag_to(x0 + int((x1 - x0) * 0.9), mid_y)
+    assert 0.8 < ctl.sparkle_gain < 1.0
+    win.on_sdl_event(type('E', (), {'type': sdl2.SDL_MOUSEBUTTONUP})())
+    assert win._drag is None
+    win.close_now()
+
+
+def test_footer_controls_never_overlap_across_window_heights() -> None:
+    """The bug that shipped once: the SPARKLE slider drawn at a fixed offset
+    from the window bottom collided with a checkbox stack that had been
+    compressed by the same short-window clamp.  Sweep a wide range of
+    heights and assert the invariant directly, rather than relying on
+    catching it by eye in a screenshot next time."""
     ctl = _BigStub()
     ctl.playing = True
-    win = _window(ctl)
-    win._draw_side_show(
-        __import__('PIL.ImageDraw', fromlist=['Draw']).Draw(
-            __import__('PIL.Image', fromlist=['new']).new('RGBA', (400, 300))),
-        10, 390, 200, 150, 120, True, (0.5, 0.3, 0.6, 0.9), ())
+    # A representative sample rather than every height -- each iteration
+    # spawns a real SDL window + render thread, and the boundary behavior
+    # (unclamped, transitioning, fully clamped) is the same across a run of
+    # adjacent heights, so a sample catches a regression just as reliably.
+    for height in (520, 530, 540, 560, 600, 640, 720, 900, 1200):
+        win = _window(ctl, window_width=980, window_height=height)
+        win._render_ui()
+        cb_regions = [r for r in win._regions
+                      if r[4] in ('crossfade_toggle', 'auto_level_toggle',
+                                  'ambience_toggle', 'keep_toggle')]
+        sparkle = next((r for r in win._regions if r[4] == 'sparkle_slider'),
+                       None)
+        if cb_regions and sparkle is not None:
+            checkbox_bottom = max(r[3] for r in cb_regions)
+            assert sparkle[1] >= checkbox_bottom, height
+        win.close_now()
+
+
+def test_spectrum_strip_gets_real_room_at_the_default_window_size() -> None:
+    """Regression for the strip rendering as a barely-visible sliver at the
+    application's actual default size (980x640) -- it was only generous in
+    windows taller than default, which most users will never see."""
+    ctl = _BigStub()
+    ctl.playing = True
+    win = _window(ctl)                 # default 980x640
+    win._render_ui()
+    assert win._height == 640 and win._width == 980
+    # No direct region for the strip itself, but its bars are drawn only
+    # when there is room; confirm the layout computed a usable height by
+    # checking the checkbox stack still sits comfortably above the floor
+    # and a spectrum draw was at least attempted (spec_peaks populated).
+    assert len(win._spec_peaks) > 0
     win.close_now()

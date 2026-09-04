@@ -175,6 +175,18 @@ def _hms(seconds: float) -> str:
     return f'{h}h{m:02d}m' if h else f'{m}m'
 
 
+def _spectrum_color(v: float) -> tuple[int, int, int]:
+    """Cyan -> pink -> yellow across *v* in [0, 1] -- the strip's "melting"
+    hue.  Louder reads hotter, the same read as the platter's own radial
+    spectrum ring, so the two visualizations agree with each other."""
+    v = max(0.0, min(1.0, v))
+    if v <= 0.55:
+        f, a, b = v / 0.55, _WAVE_HI, _PINK
+    else:
+        f, a, b = (v - 0.55) / 0.45, _PINK, _YELLOW
+    return tuple(int(a[c] * (1 - f) + b[c] * f) for c in range(3))
+
+
 class MediaDeckWindow:
     """Own-window renderer/controller UI for the local media player."""
 
@@ -235,6 +247,12 @@ class MediaDeckWindow:
         self._drag: tuple | None = None
         self._scrollbars: list = []         # (x0,y0,x1,y1, kind, geom)
         self._chrome_cache: tuple | None = None    # (key, Image)
+        # Spectrum-strip peak-hold: one falling cap per bar, so the strip
+        # reads as an analyzer (peaks drip down slower than the bars pump)
+        # rather than a flat bar graph.  Resized on the fly if the band
+        # count ever changes (e.g. the fallback idle bar count).
+        self._spec_peaks: list[float] = []
+        self._spec_peak_t = time.monotonic()
         self._prompt: dict | None = None    # one-line text prompt modal
         self._prompt_rects: list = []
         # Shared hover tooltips (core system; None on an older core).
@@ -541,7 +559,7 @@ class MediaDeckWindow:
             bar = next((b for b in self._scrollbars
                         if b[0] <= x <= b[2] and b[1] <= y <= b[3]), None)
             region = next((r for r in reversed(self._regions)
-                           if r[4] in ('seek', 'volume')
+                           if r[4] in ('seek', 'volume', 'sparkle_slider')
                            and r[0] <= x <= r[2] and r[1] <= y <= r[3]), None)
         if bar is not None:
             self._drag = ('bar', bar[4], bar[1], bar[3], bar[5])
@@ -583,6 +601,11 @@ class MediaDeckWindow:
                 x0, x1 = drag[1]
                 frac = min(1.0, max(0.0, (x - x0) / max(1, x1 - x0)))
                 self._c.set_volume(int(frac * 200))
+            elif (drag[0] == 'sparkle_slider'
+                  and hasattr(self._c, 'set_sparkle_gain')):
+                x0, x1 = drag[1]
+                frac = min(1.0, max(0.0, (x - x0) / max(1, x1 - x0)))
+                self._c.set_sparkle_gain(frac)
         except Exception as exc:            # pragma: no cover - defensive
             log.debug('media-deck: drag failed: %s', exc)
 
@@ -697,6 +720,11 @@ class MediaDeckWindow:
                 x0, x1 = payload
                 frac = min(1.0, max(0.0, (x - x0) / max(1, x1 - x0)))
                 self._c.set_volume(int(frac * 200))
+            elif (action == 'sparkle_slider'
+                  and hasattr(self._c, 'set_sparkle_gain')):
+                x0, x1 = payload
+                frac = min(1.0, max(0.0, (x - x0) / max(1, x1 - x0)))
+                self._c.set_sparkle_gain(frac)
         except Exception as exc:
             log.warning('media-deck: action %s failed: %s', action, exc)
 
@@ -1300,17 +1328,27 @@ class MediaDeckWindow:
             sx1 = gap - 4 + 10 + int((strip_w - 20) * (si + 1) / 16)
             d.rectangle([sx0, top + 2, sx1, top + 4], fill=col + (255,))
 
-        # Platter — the showpiece.  Slightly smaller than it used to be so the
-        # spectrum ring around it has air to breathe into.
-        pl_h = int(h * 0.46)
+        # Platter — the showpiece.  Smaller than it used to be, twice over:
+        # once so the spectrum ring around it has air to breathe into, and
+        # again so the spectrum *strip* below the transport (which the old
+        # fraction left as a barely-visible sliver at the default window
+        # size) gets real room without needing a taller-than-default window.
+        try:
+            sparkle = max(0.0, min(1.0,
+                float(getattr(self._c, 'sparkle_gain', 1.0) or 0.0)))
+        except (TypeError, ValueError):
+            sparkle = 1.0
+        pl_h = int(h * 0.40)
         plt_cx, plt_cy = (lx0 + lx1) // 2, top + 14 + pl_h // 2
         plt_r = min(pl_h // 2 - 18, (lx1 - lx0) // 2 - 30)
-        self._draw_platter(d, plt_cx, plt_cy, plt_r, playing, pos, dur, levels)
+        self._draw_platter(d, plt_cx, plt_cy, plt_r, playing, pos, dur,
+                           levels, sparkle)
         # The dead rectangles flanking a round platter in a square panel used
-        # to just sit there as flat panel colour -- a pair of mirrored EQ
-        # stacks plus a drift of rising sparks puts something alive in them.
+        # to just sit there as flat panel colour -- a drift of rising sparks
+        # puts something alive in them (the bar meters that used to live
+        # here moved to the full-width spectrum strip under the transport).
         self._draw_side_show(d, lx0, lx1, plt_cx, plt_cy, plt_r, playing,
-                             levels, getattr(self._c, 'audio_spectrum', ()))
+                             levels, sparkle)
         cy = top + 24 + pl_h
 
         # Now playing block.
@@ -1481,6 +1519,27 @@ class MediaDeckWindow:
                       'Volume, 0–200% (VLC backend).  100% is unity gain; '
                       'past it VLC amplifies.')
 
+        # Four checkbox rows, with the SPARKLE slider's slot reserved below
+        # them.  Computed here, before the spectrum strip, so the strip's
+        # lower edge shares the same clamp -- otherwise the two could
+        # overlap on a short window where cb_top gets pushed down toward
+        # the transport.
+        _SLIDER_H = 24
+        cb_bot = h - gap - 4 - _SLIDER_H - 6
+        cb_top = max(cb_bot - 4 * 17, cy + th + 6)
+        cb_step = max(14, (cb_bot - cb_top) // 4)
+
+        # Spectrum strip: the full 64-band FFT as a real analyzer, filling
+        # the dead vertical gap between the transport and the settings
+        # stack -- previously just flat panel colour, and the space the
+        # platter's own flanking bars were wrongly trying to occupy.
+        strip_top = cy + th + 10
+        strip_bot = cb_top - 8
+        if strip_bot - strip_top >= 24:     # a short window: not worth it
+            self._draw_spectrum_strip(
+                d, lx0, lx1, strip_top, strip_bot, playing,
+                getattr(self._c, 'audio_spectrum', ()), levels, sparkle)
+
         # Options checkboxes (bottom-left stack).  One helper so every box has
         # the same generous full-row hit target — small/adjacent click regions
         # made these feel unreliable.
@@ -1499,11 +1558,6 @@ class MediaDeckWindow:
                 regions.append((lx0 + 2, y - 2, lx0 + 31 + len(label) * 6,
                                 y + 16, action, None))
 
-        # Four rows now; the step compresses before the stack is allowed to
-        # ride up into the transport at small heights.
-        cb_bot = h - gap - 4
-        cb_top = max(cb_bot - 4 * 17, cy + th + 6)
-        cb_step = max(14, (cb_bot - cb_top) // 4)
         can_xf = bool(snap.get('can_crossfade', False))
         can_al = bool(snap.get('can_auto_level', False))
         _checkbox(cb_top,
@@ -1526,6 +1580,49 @@ class MediaDeckWindow:
                   'clamped.  Measured once per track in the background and '
                   'cached, so a quiet rip and a slammed master play at the '
                   'same level.')
+
+        # SPARKLE slider: a local knob (the mixer's own SPARKLE gain is
+        # private to its window too -- nothing global exists to hook into),
+        # governing only the decorative twinkle layer across the deck's
+        # chrome: the platter's orbiting glints, the flank sparks, and the
+        # spectrum strip's flecks below.  0 leaves the bars/rings/glow alone.
+        # Its reserved slot sits right after the checkbox stack's *own*
+        # reserved bottom (cb_bot) in the normal case; the max() also covers
+        # the checkbox stack's *actual* rendered bottom, which can run past
+        # cb_bot once cb_step gets compressed on a short window -- without
+        # it, a compressed stack's last row and the slider would overlap.
+        # Skipped entirely -- like the spectrum strip above -- when a short
+        # window leaves no real room for either placement.
+        sp_y = max(cb_bot + 6, cb_top + 4 * cb_step + 6)
+        if sp_y + 16 <= h - gap - 2:
+            d.text((lx0 + 6, sp_y - 2), 'SPARKLE', font=self._font_s,
+                   fill=_DIM)
+            sp_x0, sp_x1 = lx0 + 66, lx1 - 44
+            d.rounded_rectangle([sp_x0, sp_y + 2, sp_x1, sp_y + 12], radius=5,
+                                fill=(0, 0, 0, 110), outline=_FAINT)
+            sp_w = int((sp_x1 - sp_x0) * sparkle)
+            if sp_w > 4:
+                segs = 10
+                for si in range(segs):
+                    f0, f1 = si / segs, (si + 1) / segs
+                    if f0 * (sp_x1 - sp_x0) >= sp_w:
+                        break
+                    col = (_WAVE_HI if f1 < 0.5 else _PINK if f1 < 0.85
+                           else _YELLOW)
+                    d.rectangle([sp_x0 + int((sp_x1 - sp_x0) * f0), sp_y + 2,
+                                sp_x0 + min(sp_w, int((sp_x1 - sp_x0) * f1)),
+                                sp_y + 12], fill=col)
+                d.ellipse([sp_x0 + sp_w - 4, sp_y, sp_x0 + sp_w + 4,
+                          sp_y + 14], fill=(255, 255, 255, 235))
+            d.text((sp_x1 + 6, sp_y + 2), f'{int(sparkle * 100)}%',
+                   font=self._font_s, fill=_FAINT)
+            regions.append((sp_x0, sp_y - 2, sp_x1, sp_y + 16,
+                            'sparkle_slider', (sp_x0, sp_x1)))
+            self._tip(tips, sp_x0, sp_y - 2, sp_x1, sp_y + 16,
+                      'Sparkle intensity for the platter glints, flank '
+                      'sparks, and spectrum strip flecks.  A local knob '
+                      '(like the mixer’s own) -- the bars and rings stay '
+                      'lit at 0, only the twinkle goes dark.')
 
         # Library pane (right column): LIBRARY | PLAYLISTS tabs, accordion
         # crates with per-crate exclude toggles, sort flyout, playlist picker.
@@ -2203,62 +2300,137 @@ class MediaDeckWindow:
         d.rectangle([x0 + 3, y0 + 1, x1 - 1, y0 + max(2, (y1 - y0) // 3)],
                     fill=glow + (14 + int(34 * pulse),))
 
+    #: The strip's peak falls this fraction of its own height per second --
+    #: fast enough to keep chasing the music, slow enough to read as a drip
+    #: rather than snapping back to the bar instantly.
+    _SPEC_FALL_PER_S = 0.72
+
+    def _draw_spectrum_strip(self, d, x0, x1, y0, y1, playing, spectrum,
+                             levels, sparkle_gain: float = 1.0) -> None:
+        """The full-FFT analyzer strip under the transport.
+
+        One bar per band of the app's own spectrum (64 by default -- every
+        band, not a folded-down handful), each with a cyan-to-pink-to-yellow
+        vertical gradient hottest at the tip, a peak-hold cap that **drips**
+        down slower than the bar itself falls (the read of "analyzer" over
+        "bar graph"), a soft glow, and a fading reflection below the
+        baseline.  Idle (nothing playing) keeps a slow breathing pattern
+        instead of going flat and dark.  Sparkle flecks on the loudest bars
+        are gated by *sparkle_gain* -- 0 leaves the bars/gradient/reflection
+        alone and only removes the twinkle layer.
+        """
+        width, height = x1 - x0, y1 - y0
+        if width < 40 or height < 20:
+            return
+        _bass, _mid, treble, beat = (tuple(levels) + (0.0,) * 4)[:4]
+        spec = tuple(spectrum) if spectrum else ()
+        n = len(spec) if spec else 32
+        if len(self._spec_peaks) != n:
+            self._spec_peaks = [0.0] * n
+        now = time.monotonic()
+        dt = max(0.0, min(0.25, now - self._spec_peak_t))
+        self._spec_peak_t = now
+        gap_px = 2.0
+        bar_w = max(1.0, (width - (n - 1) * gap_px) / n)
+        fall = height * self._SPEC_FALL_PER_S
+        for i in range(n):
+            if playing and spec:
+                v = float(spec[i])
+            else:
+                # Idle: a faint, slow breathing wave -- silence should never
+                # read as "broken", just quiet.
+                v = 0.04 + 0.035 * math.sin(now * 0.55 + i * 0.4)
+            v = max(0.0, min(1.0, v))
+            bar_h = height * min(1.0, 0.03 + v * 0.97)
+            peak = max(bar_h, self._spec_peaks[i] - fall * dt)
+            self._spec_peaks[i] = peak
+            bx0 = x0 + i * (bar_w + gap_px)
+            bx1 = bx0 + bar_w
+            col = _spectrum_color(v)
+            # Glow: a softer, slightly wider duplicate behind the bar --
+            # cheap neon bloom, same trick the header wordmark uses.
+            d.rectangle([bx0 - 1, y1 - bar_h - 2, bx1 + 1, y1],
+                       fill=col + (int(46 * (0.4 + 0.6 * v)),))
+            # Body: a short vertical gradient, cool base rising to a hot tip
+            # -- the "melting" read, one bar at a time.
+            slices = 3
+            for si in range(slices):
+                f1 = (si + 1) / slices
+                seg = tuple(int(_WAVE_HI[c] * (1 - f1) + col[c] * f1)
+                           for c in range(3))
+                sy0 = y1 - bar_h * f1
+                sy1 = y1 - bar_h * (si / slices)
+                d.rectangle([bx0, sy0, bx1, sy1], fill=seg + (210,))
+            # Peak cap, and the drip trail down to wherever the bar has
+            # fallen to since -- a melting streak, not a hard edge.
+            peak_y = y1 - peak
+            if peak > bar_h + 1.5:
+                trail_h = peak - bar_h
+                steps = max(1, int(trail_h // 3))
+                for s in range(steps):
+                    fa = 1.0 - s / steps
+                    ty0 = peak_y + s * 3
+                    d.rectangle([bx0, ty0, bx1, ty0 + 3],
+                               fill=(255, 255, 255, int(70 * fa)))
+            d.rectangle([bx0, peak_y - 2, bx1, peak_y],
+                       fill=(255, 255, 255, 220))
+            # Reflection: a fading mirror below the baseline, like a wet
+            # floor under the analyzer.
+            refl_h = min(bar_h * 0.4, 14.0)
+            rsteps = 5
+            for s in range(rsteps):
+                fa = (1.0 - s / rsteps) * 0.22
+                ry0 = y1 + 2 + s * (refl_h / rsteps)
+                d.rectangle([bx0, ry0, bx1, ry0 + refl_h / rsteps],
+                           fill=col + (int(255 * fa),))
+            # Sparkle flecks on the hottest bars -- the only part of this
+            # strip the SPARKLE slider governs.
+            if sparkle_gain > 0.0 and playing and v > 0.55:
+                flick = (math.sin(now * 9.0 + i * 1.7) + 1.0) * 0.5
+                if flick > (1.05 - 0.6 * sparkle_gain):
+                    fx, fy = bx0 + bar_w / 2, peak_y - 6 - flick * 8
+                    alpha = int(210 * sparkle_gain * flick)
+                    d.ellipse([fx - 2, fy - 2, fx + 2, fy + 2],
+                             fill=(255, 255, 255, alpha))
+        # Beat flash: a bright scanline sweeping the strip's mid-height.
+        if playing and beat > 0.08:
+            fy = y1 - height * 0.5
+            d.line([x0, fy, x1, fy],
+                  fill=_WAVE_HI[:3] + (int(90 * beat),), width=1)
+
     def _draw_side_show(self, d, lx0, lx1, cx, cyc, r, playing, levels,
-                        spectrum) -> None:
+                        sparkle_gain: float = 1.0) -> None:
         """Fill the flanks beside the round platter with something alive.
 
         A platter is a circle in a rectangular pane, which leaves two dead
-        strips of flat panel colour beside it -- real space, visibly empty,
-        and previously just background.  Each flank gets a small mirrored
-        EQ (bars built from the app's own spectrum, closest to the platter
-        = lowest band) and a slow drift of rising sparks for whimsy.  Skips
-        entirely when a flank is too narrow to read as anything but a
-        rendering glitch -- a small window's platter already fills the pane.
+        strips of flat panel colour beside it.  The bar meters that used to
+        live here moved to the full-width spectrum strip under the transport
+        (a platter-height flank was never wide enough to read as a real
+        analyzer); what's left is a slow drift of rising sparks for whimsy,
+        scaled by *sparkle_gain* -- 0 goes dark, the rest of the deck's
+        chrome is unaffected.  Skips entirely when a flank is too narrow to
+        read as anything but a rendering glitch, or while sparkle is off.
         """
+        if sparkle_gain <= 0.0 or not playing:
+            return
         _bass, _mid, treble, beat = (tuple(levels) + (0.0,) * 4)[:4]
-        spec = tuple(spectrum) if spectrum else ()
         t = time.monotonic()
         for side, x0, x1 in (('L', lx0, cx - r - 10), ('R', cx + r + 10, lx1)):
             avail = x1 - x0
             if avail < 28:
                 continue
-            n = max(3, min(7, avail // 12))
-            gap3 = 3
-            bar_w = max(3, (avail - (n - 1) * gap3) // n)
-            band = (spec[:n] if side == 'L' else spec[-n:]) if spec else ()
-            band = tuple(band) + (0.0,) * (n - len(band))
             base_y = cyc + r - 6
             top_y = cyc - r + 6
             span = max(10, base_y - top_y)
-            for i in range(n):
-                if playing:
-                    v = float(band[i])
-                else:
-                    # Idle: a faint, slow breathing pair instead of a flat
-                    # dead stack, so silence doesn't read as "broken".
-                    v = 0.05 + 0.04 * math.sin(t * 0.6 + i * 0.8)
-                bh = int(span * min(1.0, 0.05 + v * 0.95))
-                bx = (x0 + i * (bar_w + gap3) if side == 'L'
-                      else x1 - (i + 1) * bar_w - i * gap3)
-                col = (_YELLOW if v > 0.85 else _PINK if v > 0.5
-                       else _WAVE_HI)
-                d.rectangle([bx, base_y - bh, bx + bar_w, base_y],
-                           fill=col[:3] + (50 + int(150 * v),))
-                if bh > 3:                  # a bright cap, like a peak LED
-                    d.rectangle([bx, base_y - bh - 2, bx + bar_w,
-                                base_y - bh], fill=(255, 255, 255,
-                                                    80 + int(120 * v)))
-            if not playing:
-                continue
-            # Rising sparks: a handful of pseudo-random glints drifting up
-            # the flank and fading at the top, a little pop of size on beats.
+            # A handful of pseudo-random glints drifting up the flank and
+            # fading at the top, a little pop of size on beats.
             for k in range(5):
                 seed = k * 13 + (0 if side == 'L' else 97)
                 cycle = 3.4 + (seed % 5) * 0.7
                 phase = ((t / cycle) + (seed * 0.37) % 1.0) % 1.0
                 py = base_y - phase * span
                 px = x0 + ((seed * 53) % max(1, avail - 4)) + 2
-                alpha = int(150 * math.sin(phase * math.pi))
+                alpha = int(150 * sparkle_gain * math.sin(phase * math.pi))
                 if alpha <= 4:
                     continue
                 spark_col = _WAVE_HI if seed % 2 == 0 else _PINK
@@ -2267,15 +2439,16 @@ class MediaDeckWindow:
                           fill=spark_col[:3] + (alpha,))
 
     def _draw_platter(self, d, cx, cyc, r, playing, pos, dur,
-                      levels=(0.0, 0.0, 0.0, 0.0)) -> None:
+                      levels=(0.0, 0.0, 0.0, 0.0), sparkle_gain=1.0) -> None:
         """The neon platter, media-deck flavour — and now it *hears* the room.
 
         Cyan glow breathing with a slow pulse while playing, deepened by live
         bass; a beat flash on the outer rim; a radial spectrum ring orbiting
         the record; grooves, strobe spokes (thicker with treble), orbiting
-        sparkles, and a progress dot riding the rim.  Silence degrades to the
-        old purely time-driven look, so a core without audio levels loses the
-        reactivity and nothing else.
+        sparkles (scaled by *sparkle_gain* -- 0 leaves the ring/glow/grooves
+        alone and just kills the twinkle layer), and a progress dot riding
+        the rim.  Silence degrades to the old purely time-driven look, so a
+        core without audio levels loses the reactivity and nothing else.
         """
         if r < 40:
             return
@@ -2339,11 +2512,13 @@ class MediaDeckWindow:
             lx = cx + (r * 0.42) * math.cos(spoke_a)
             ly = cyc + (r * 0.42) * math.sin(spoke_a)
             d.line([lx, ly, sx, sy], fill=col, width=2)
-        if playing:
+        if playing and sparkle_gain > 0.0:
             phase = int(pos * 8)
             # Treble opens the sparkle gate: a busy top end fills the platter
-            # with glints, a dark drop leaves only the steady pair.
-            gate = 2 + int(2 * min(1.0, max(0.0, treble)))
+            # with glints, a dark drop leaves only the steady pair.  Sparkle
+            # gain scales the gate too, so turning it down thins the glints
+            # out gradually rather than an all-or-nothing cutoff.
+            gate = 2 + int(2 * min(1.0, max(0.0, treble)) * sparkle_gain)
             for i in range(12):
                 if (i * 7 + phase) % 5 >= gate:
                     continue

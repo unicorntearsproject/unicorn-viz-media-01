@@ -292,7 +292,7 @@ def test_audio_levels_are_captured_only_while_the_deck_is_open(tmp_path) -> None
     ctl._window = object()
     ctl._capture_audio_levels(_Audio())
     assert ctl.audio_levels == (0.5, 0.25, 1.0, 0.9)   # clamped to [0, 1]
-    assert len(ctl.audio_spectrum) == 16
+    assert len(ctl.audio_spectrum) == 64        # full FFT, not folded down
     assert all(0.0 <= v <= 1.0 for v in ctl.audio_spectrum)
     assert ctl.audio_spectrum[0] < ctl.audio_spectrum[-1]
     ctl._window = None
