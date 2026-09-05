@@ -1,7 +1,7 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.28.4
+Version: 0.29.0
 Status: beta
 Last updated: 2026-09-04
 
@@ -98,6 +98,19 @@ Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
 
+- **0.29.0** — **Control Room panel (P3 of
+  `docs/planning/control-room-drop-in-integration-plan-2026-09-05.md`).**
+  A medium panel on the shared `sources` page: PLAY/PAUSE, PREV, NEXT,
+  SHUFFLE, REPEAT, XFADE, and DECK (open/close the Media Deck window),
+  all routed through the same verbs the hotkeys use. Rows show
+  shuffle/repeat/crossfade/auto-level state, deliberately with no
+  title/artist -- media-01 already feeds the core now-playing hub and
+  INFO shows the active source, so repeating it here would be a second,
+  driftable copy. Registered only past the `enabled` early-return in
+  `__init__` (a disabled instance is discarded outright by `app.py`, so
+  registering before that guard would orphan the panel with no
+  `shutdown()` ever called to unregister it); `shutdown()` now
+  unregisters it.
 - **0.28.4** — **Fixed a hard crash (SIGSEGV) when starting a track with
   crossfade on.** `crossfade_to()` called `audio_set_volume(0)` on the
   incoming player the instant after `play()`, but `play()` is asynchronous:

@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.28.4'
+__version__ = '0.29.0'
 
 import json
 import logging
@@ -866,6 +866,36 @@ class MediaController:
                 vj.register_now_playing('media', self.snapshot, priority=20)
             except Exception as exc:
                 log.debug('media-01: now-playing registration failed: %s', exc)
+        # Control Room panel (docs/planning/control-room-drop-in-integration-
+        # plan-2026-09-05.md, P3). Registered only past the ``if not
+        # self.enabled: return`` above -- app.py discards a disabled instance
+        # outright (self._media = None), so a panel registered before that
+        # guard would be orphaned with no shutdown() ever called to
+        # unregister it.
+        register = getattr(vj, 'register_operator_panel', None)
+        if callable(register):
+            try:
+                from unicornviz.operator_panels import OperatorPanel  # noqa: PLC0415
+                register(OperatorPanel(
+                    name='media',
+                    title='Media Player',
+                    page='sources',
+                    priority=42,
+                    size='medium',
+                    content=self._operator_panel_content,
+                    on_action=self._operator_panel_action,
+                    tooltips={
+                        'play_pause': 'Play or pause the current track',
+                        'prev': 'Previous track (restarts it past 3s in)',
+                        'next': 'Next track',
+                        'shuffle': 'Toggle shuffle',
+                        'repeat': 'Cycle repeat: ALL -> ONE -> OFF',
+                        'crossfade': 'Toggle crossfade',
+                        'deck': 'Open/close the Media Deck window',
+                    },
+                ))
+            except Exception as exc:
+                log.debug('media-01: operator panel registration failed: %s', exc)
         # Offer ourselves as a playlist destination, so another drop-in (the
         # DJ mixer) can hand us a set without either of us importing the
         # other.  Registered late in __init__ so _playlists exists by the time
@@ -2031,6 +2061,54 @@ class MediaController:
         else:
             self.open_window()
 
+    def _operator_panel_content(self) -> Any:
+        """Control Room panel state -- CR render thread; property reads only.
+
+        No title/artist here by design: media-01 already feeds the core
+        now-playing hub and INFO shows the active source -- repeating it
+        here would be a second, driftable source of truth (plan §2 notes).
+        """
+        from unicornviz.operator_panels import PanelButton, PanelContent, PanelRow  # noqa: PLC0415
+        snap = self.snapshot()
+        playing = bool(snap.get('is_playing', False))
+        return PanelContent(
+            status=str(snap.get('status', '') or '-'),
+            rows=(
+                PanelRow('Shuffle', 'ON' if self._shuffle else 'OFF'),
+                PanelRow('Repeat', self.repeat.upper()),
+                PanelRow('Crossfade', 'ON' if self.crossfade_enabled else 'OFF'),
+                PanelRow('Auto-level', 'ON' if self.auto_level_enabled else 'OFF'),
+            ),
+            buttons=(
+                PanelButton('play_pause', 'PAUSE' if playing else 'PLAY', active=playing),
+                PanelButton('prev', 'PREV'),
+                PanelButton('next', 'NEXT'),
+                PanelButton('shuffle', 'SHUFFLE', active=self._shuffle),
+                PanelButton('repeat', 'REPEAT', active=self.repeat != 'off'),
+                PanelButton('crossfade', 'XFADE', active=self.crossfade_enabled),
+                PanelButton('deck', 'DECK', active=self.is_window_open),
+            ),
+        )
+
+    def _operator_panel_action(self, action: str, _payload: Any) -> str | None:
+        """Control Room buttons -> the same verbs the hotkeys use."""
+        if action == 'play_pause':
+            return self.play_pause()
+        if action == 'prev':
+            return self.prev_track()
+        if action == 'next':
+            return self.next_track()
+        if action == 'shuffle':
+            return self.toggle_shuffle()
+        if action == 'repeat':
+            return self.cycle_repeat()
+        if action == 'crossfade':
+            return self.toggle_crossfade()
+        if action == 'deck':
+            self.toggle_window()
+            return f'Media Deck {"open" if self.is_window_open else "closed"}'
+        return None
+
     def present(self) -> None:
         """Blit the Media Deck window (called each frame by the app)."""
         win = self._window
@@ -2046,6 +2124,12 @@ class MediaController:
         if vj is not None and hasattr(vj, 'unregister_now_playing'):
             try:
                 vj.unregister_now_playing('media')
+            except Exception:
+                pass
+        unregister = getattr(vj, 'unregister_operator_panel', None)
+        if callable(unregister):
+            try:
+                unregister('media')
             except Exception:
                 pass
         self.close_window()
