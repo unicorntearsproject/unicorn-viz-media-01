@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import os
 import threading
 import time
 from pathlib import Path
@@ -74,7 +73,8 @@ def test_legacy_single_file_cache_is_adopted_only_for_matching_root(tmp_path, mo
     legacy = _mc._cache_path(None)
     legacy.parent.mkdir(parents=True)
     mine = str(root / 'track0.mp3')
-    junk = '/tmp/pytest-of-someone/lib/track0.mp3'
+    # Same track layout under a *foreign* root: must be filtered out.
+    junk = str((tmp_path / 'other-machine' / 'lib' / 'track0.mp3').resolve())
     legacy.write_text(json.dumps({'version': _mc._CACHE_VERSION, 'entries': {
         mine: {'size': 16, 'mtime': 0.0, 'title': 'from-legacy'},
         junk: {'size': 16, 'mtime': 0.0, 'title': 'junk'},

@@ -2286,7 +2286,6 @@ class MediaController:
             # Core playback state
             'available': bool(self.enabled and self._backend is not None and bool(self._library)),
             'library_loading': self.library_loading,
-            'library_size': len(self._library),
             'is_playing': self._is_playing,
             'status': self._status.upper(),
             # Current track
