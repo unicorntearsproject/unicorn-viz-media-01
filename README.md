@@ -1,9 +1,9 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.29.0
+Version: 0.29.1
 Status: beta
-Last updated: 2026-09-04
+Last updated: 2026-09-05
 
 `media-01` is a local audio playback subsystem for unicorn-viz.  It scans a
 directory of audio files, reads ID3/Vorbis/FLAC tags via `mutagen`, and plays
@@ -98,6 +98,19 @@ Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
 
+- **0.29.1** — **The library load no longer freezes boot, and the tag cache
+  can no longer be destroyed by a test run.** Two defects: (1) one shared
+  `media_library_cache.json` was rewritten by *every* scan of *any*
+  directory — including this drop-in's own test suite scanning five-file
+  temp libraries on every commit hook — so nine of the owner's last ten
+  sessions started with "0 cached, 10843 read" and a 7–14 s tag re-read;
+  the cache is now one file per media root (`media_library_cache-<hash>.json`)
+  and tests point `UNICORNVIZ_MEDIA_CACHE_DIR` at a temp dir. (2) The
+  constructor blocked on the splash-time prescan (`wait(300)`), so that
+  re-read ran on the main thread; a prescan still running is now installed
+  by `update()` the frame it lands, the deck shows "scanning library…"
+  meanwhile, boot auto-play waits for it, and `snapshot()` carries
+  `library_loading` / `library_size`.
 - **0.29.0** — **Control Room panel (P3 of
   `docs/planning/control-room-drop-in-integration-plan-2026-09-05.md`).**
   A medium panel on the shared `sources` page: PLAY/PAUSE, PREV, NEXT,

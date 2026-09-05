@@ -1693,6 +1693,9 @@ class MediaDeckWindow:
                 d.text((rx0 + 8 + len(text) * 6, ty + 22),
                        f'· {nfilt} filter{"s" if nfilt > 1 else ""}',
                        font=self._font_s, fill=_HOT)
+        elif getattr(self._c, 'library_loading', False):
+            d.text((rx0 + 4, ty + 22), 'scanning library…',
+                   font=self._font_s, fill=_WARN)
         elif nfilt:
             d.text((rx0 + 4, ty + 22), f'0 tracks · {nfilt} filter(s) on',
                    font=self._font_s, fill=_WARN)

@@ -19,8 +19,9 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.29.0'
+__version__ = '0.29.1'
 
+import hashlib
 import json
 import logging
 import os
@@ -250,33 +251,66 @@ def measure_gain(path: Path) -> float | None:
 
 _CACHE_VERSION = 1
 _TAG_WORKERS = 8
+#: Override the cache directory (tests point it at a temp dir).
+_CACHE_DIR_ENV = 'UNICORNVIZ_MEDIA_CACHE_DIR'
 
 
-def _cache_path() -> Path:
-    """Where the tag cache lives (beside the playlists store)."""
-    return (Path(__file__).resolve().parents[2] / 'runtime'
-            / 'media_library_cache.json')
+def _cache_dir() -> Path:
+    override = os.environ.get(_CACHE_DIR_ENV, '').strip()
+    if override:
+        return Path(override).expanduser()
+    return Path(__file__).resolve().parents[2] / 'runtime'
 
 
-def _load_tag_cache() -> dict[str, dict[str, Any]]:
-    """Read the persisted tag cache: {path: {size, mtime, **tags}}.
+def _cache_path(root: Path | None = None) -> Path:
+    """Where the tag cache for *root* lives (beside the playlists store).
+
+    One file **per media root** (2026-09-05).  There used to be a single
+    ``media_library_cache.json``, and every scan of any directory rewrote
+    it -- including the test suite's scans of five-file temp libraries,
+    which ran on every commit hook.  Nine of the owner's last ten sessions
+    therefore started with "0 cached, 10843 read": a 7-14 s tag re-read on
+    the main thread, for a cache that had been intact the night before.
+    Keying the file by root makes that structurally impossible; the env
+    override is belt and braces for tests.
+    """
+    base = _cache_dir()
+    if root is None:
+        return base / 'media_library_cache.json'          # legacy, read-only
+    digest = hashlib.sha1(str(root).encode('utf-8', 'replace'),
+                          usedforsecurity=False).hexdigest()[:12]
+    return base / f'media_library_cache-{digest}.json'
+
+
+def _load_tag_cache(root: Path) -> dict[str, dict[str, Any]]:
+    """Read the persisted tag cache for *root*: {path: {size, mtime, **tags}}.
 
     A miss of any kind is not an error -- the scan simply re-reads tags.
+    Falls back to the legacy single-file cache once, keeping only the
+    entries that actually live under *root*.
     """
-    try:
-        raw = json.loads(_cache_path().read_text(encoding='utf-8'))
+    for path in (_cache_path(root), _cache_path(None)):
+        try:
+            raw = json.loads(path.read_text(encoding='utf-8'))
+        except Exception:
+            continue
         if int(raw.get('version', 0)) != _CACHE_VERSION:
-            return {}
-        return dict(raw.get('entries') or {})
-    except Exception:
-        return {}
+            continue
+        entries = dict(raw.get('entries') or {})
+        if path.name == 'media_library_cache.json':
+            prefix = str(root).rstrip(os.sep) + os.sep
+            entries = {k: v for k, v in entries.items() if k.startswith(prefix)}
+            if not entries:
+                continue
+        return entries
+    return {}
 
 
-def _save_tag_cache(entries: dict[str, dict[str, Any]]) -> None:
-    """Persist the tag cache, atomically.  Best-effort: a failure here only
-    costs the next start its speed, never correctness."""
+def _save_tag_cache(root: Path, entries: dict[str, dict[str, Any]]) -> None:
+    """Persist *root*'s tag cache, atomically.  Best-effort: a failure here
+    only costs the next start its speed, never correctness."""
     try:
-        path = _cache_path()
+        path = _cache_path(root)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix('.json.tmp')
         tmp.write_text(json.dumps({'version': _CACHE_VERSION,
@@ -297,7 +331,11 @@ def _scan_library(directory: Path) -> list[dict[str, Any]]:
     since the work is I/O-bound.  Correctness never depends on the cache:
     any miss, staleness or read failure just falls back to reading tags.
     """
-    cache = _load_tag_cache()
+    try:
+        root = directory.resolve() if directory.exists() else directory
+    except OSError:
+        root = directory
+    cache = _load_tag_cache(root)
     fresh: dict[str, dict[str, Any]] = {}
     found: list[tuple[Path, str, int, float]] = []
     try:
@@ -354,7 +392,7 @@ def _scan_library(directory: Path) -> list[dict[str, Any]]:
     log.info('media-01: scan %d track(s) — %d cached, %d read',
              len(tracks), hits, len(stale))
     if stale or len(fresh) != len(cache):
-        _save_tag_cache(fresh)
+        _save_tag_cache(root, fresh)
     return tracks
 
 
@@ -837,23 +875,26 @@ class MediaController:
         if not self.enabled:
             return
 
-        self.rescan_library()
-        if not self._library:
-            log.warning(
-                'media-01: no audio files found in %s; check media_dir in config',
-                self._media_dir,
-            )
-
-        if self._shuffle:
-            import numpy as np  # noqa: PLC0415
-            rng = np.random.default_rng()
-            rng.shuffle(self._library)  # type: ignore[arg-type]
+        # Library load (2026-09-05).  The constructor used to block on the
+        # splash-time prescan -- pending.wait(300) on the main thread -- so
+        # a cold tag cache (see _cache_path) froze boot for 7-14 s.  Now: a
+        # finished prescan is installed at once; one still running is
+        # installed by update() the frame it lands; only when no prescan
+        # ran at all (tools, tests) does this walk synchronously.
+        self._library_loading = False
+        self._library_pending: threading.Event | None = None
+        self._library_pending_key = ''
+        self._library_scan_attempts = 0
+        self._library_shuffle_pending = False
+        self._play_when_loaded = False
+        self.rescan_library(wait=False, shuffle_after=True)
 
         self._backend = _make_backend(self._volume)
 
         log.info(
-            'media-01: ready — %d tracks in library, backend=%s',
+            'media-01: ready — %d tracks in library%s, backend=%s',
             len(self._library),
+            ' (still scanning; the deck fills in when it lands)' if self._library_loading else '',
             type(self._backend).__name__ if self._backend else 'none',
         )
 
@@ -1028,6 +1069,11 @@ class MediaController:
         """Toggle play/pause for the current track."""
         if not self.enabled or self._backend is None:
             return 'Media: no backend'
+        if self._library_loading:
+            # Boot auto-play (App._maybe_auto_play_media) arrives while the
+            # prescan is still walking; remember it and play when it lands.
+            self._play_when_loaded = True
+            return 'Media: library still loading — will play when ready'
         if not self._library:
             return 'Media: library empty'
         if self._backend.is_playing():
@@ -1357,6 +1403,8 @@ class MediaController:
             return
 
         now = time.monotonic()
+        if self._library_loading:
+            self._poll_library_load()     # the prescan lands here, one frame late at most
         self._capture_audio_levels(audio)
 
         tick = getattr(self._backend, 'tick', None)
@@ -1790,35 +1838,90 @@ class MediaController:
             idx.sort(key=_key, reverse=not self._sort_asc)
         return idx
 
-    def rescan_library(self) -> None:
+    def rescan_library(self, *, wait: bool = True, shuffle_after: bool = False) -> bool:
         """(Re)walk the media dir and tag each track's crate *path*.
 
         Crates nest: a track's bucket is its directory path relative to the
         media dir, '/'-joined, truncated to ``crate_depth`` (default 5).
+
+        Prefers a background prescan result (kicked off during the splash).
+        If the prescan is still running: ``wait=True`` blocks for it (the
+        old behaviour, for tools and runtime rescans); ``wait=False`` returns
+        False and leaves the install to ``update()``.  With no prescan at
+        all, the walk runs here.  Returns True when the library is in place.
         """
-        depth = max(1, int(self._cfg.get('crate_depth', 5) or 5))
-        # Prefer a background prescan result (kicked off during the splash) to
-        # avoid re-walking the library on the main thread; fall back to a
-        # synchronous scan when no prescan ran (e.g. a runtime rescan).
         key = str(self._media_dir.resolve()) if self._media_dir.exists() else str(self._media_dir)
         cached: list[dict[str, Any]] | None
         with _LIBRARY_SCAN_LOCK:
             cached = _LIBRARY_SCAN_CACHE.pop(key, None)
             pending = None if cached is not None else _LIBRARY_SCAN_PENDING.get(key)
         if pending is not None:
+            if not wait:
+                self._library_loading = True
+                self._library_pending = pending
+                self._library_pending_key = key
+                self._library_shuffle_pending = shuffle_after
+                return False
             # A prescan is already walking these files.  Wait for it rather
             # than starting a second concurrent walk of the same library.
             pending.wait(timeout=300.0)
             with _LIBRARY_SCAN_LOCK:
                 cached = _LIBRARY_SCAN_CACHE.pop(key, None)
                 _LIBRARY_SCAN_PENDING.pop(key, None)
-        self._library = cached if cached is not None else _scan_library(self._media_dir)
-        for t in self._library:
+        tracks = cached if cached is not None else _scan_library(self._media_dir)
+        self._install_library(tracks, shuffle=shuffle_after)
+        return True
+
+    @property
+    def library_loading(self) -> bool:
+        """True while the startup scan is still running off-thread."""
+        return bool(getattr(self, '_library_loading', False))
+
+    def _poll_library_load(self) -> None:
+        """Main thread, per frame: install the prescan once it has landed."""
+        ev = self._library_pending
+        if ev is None or not ev.is_set():
+            return
+        key = self._library_pending_key
+        with _LIBRARY_SCAN_LOCK:
+            tracks = _LIBRARY_SCAN_CACHE.pop(key, None)
+            _LIBRARY_SCAN_PENDING.pop(key, None)
+        self._library_loading = False
+        self._library_pending = None
+        if tracks is None:
+            # The prescan died without a result.  Walk again -- still off the
+            # main thread -- but not forever.
+            self._library_scan_attempts += 1
+            if self._library_scan_attempts <= 2:
+                log.warning('media-01: library prescan produced nothing; rescanning')
+                type(self).prescan_async(self._cfg)
+                self.rescan_library(wait=False, shuffle_after=self._library_shuffle_pending)
+                return
+            tracks = []
+        self._install_library(tracks, shuffle=self._library_shuffle_pending)
+        log.info('media-01: library loaded — %d tracks', len(self._library))
+        if self._play_when_loaded and self._library:
+            self._play_when_loaded = False
+            log.info('media-01: deferred auto-play: %s', self.play_pause())
+
+    def _install_library(self, tracks: list[dict[str, Any]], *, shuffle: bool) -> None:
+        depth = max(1, int(self._cfg.get('crate_depth', 5) or 5))
+        for t in tracks:
             try:
                 rel = Path(t['path']).relative_to(self._media_dir)
                 t['bucket'] = '/'.join(rel.parts[:-1][:depth])
             except Exception:
                 t['bucket'] = ''
+        if not tracks:
+            log.warning(
+                'media-01: no audio files found in %s; check media_dir in config',
+                self._media_dir,
+            )
+        if shuffle and tracks and self._shuffle:
+            import numpy as np  # noqa: PLC0415
+            rng = np.random.default_rng()
+            rng.shuffle(tracks)  # type: ignore[arg-type]
+        self._library = tracks
 
     @staticmethod
     def _under(bucket: str, prefix: str) -> bool:
@@ -2182,6 +2285,8 @@ class MediaController:
         return {
             # Core playback state
             'available': bool(self.enabled and self._backend is not None and bool(self._library)),
+            'library_loading': self.library_loading,
+            'library_size': len(self._library),
             'is_playing': self._is_playing,
             'status': self._status.upper(),
             # Current track
