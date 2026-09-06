@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.29.1'
+__version__ = '0.29.2'
 
 import hashlib
 import json
@@ -255,11 +255,17 @@ _TAG_WORKERS = 8
 _CACHE_DIR_ENV = 'UNICORNVIZ_MEDIA_CACHE_DIR'
 
 
+def _app_root() -> Path:
+    """The app root, honoring core's ``UNICORNVIZ_APP_ROOT`` override."""
+    root = os.environ.get('UNICORNVIZ_APP_ROOT', '').strip()
+    return Path(root).expanduser() if root else Path(__file__).resolve().parents[2]
+
+
 def _cache_dir() -> Path:
     override = os.environ.get(_CACHE_DIR_ENV, '').strip()
     if override:
         return Path(override).expanduser()
-    return Path(__file__).resolve().parents[2] / 'runtime'
+    return _app_root() / 'runtime'
 
 
 def _cache_path(root: Path | None = None) -> Path:
@@ -956,8 +962,7 @@ class MediaController:
             _mod = _ilu.module_from_spec(_spec)
             _spec.loader.exec_module(_mod)
             store_path = self._cfg.get('playlists_path') or (
-                Path(__file__).resolve().parents[2] / 'runtime'
-                / 'media_playlists.json')
+                _app_root() / 'runtime' / 'media_playlists.json')
             self._playlists = _mod.MediaPlaylists(store_path)
         except Exception as exc:
             log.warning('media-01: playlists store unavailable: %s', exc)

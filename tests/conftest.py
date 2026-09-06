@@ -9,6 +9,9 @@ on that door, not the only one.
 """
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 
 
@@ -16,4 +19,28 @@ import pytest
 def _isolated_media_cache(tmp_path_factory, monkeypatch):
     monkeypatch.setenv('UNICORNVIZ_MEDIA_CACHE_DIR',
                        str(tmp_path_factory.mktemp('media-cache')))
+    root = tmp_path_factory.mktemp('app-root')
+    (root / 'runtime').mkdir()
+    monkeypatch.setenv('UNICORNVIZ_APP_ROOT', str(root))   # playlists store etc.
     yield
+
+
+_REPO = Path(__file__).resolve().parents[3]
+_GUARDED = ('runtime', 'logs')
+
+
+def _snapshot() -> dict[str, set[str]]:
+    return {n: ({p.name for p in (_REPO / n).iterdir()} if (_REPO / n).is_dir() else set())
+            for n in _GUARDED}
+
+
+@pytest.fixture(scope='session', autouse=True)
+def _owner_state_guard():
+    """Fail the session if any test left a new file in the real runtime/ or logs/."""
+    before = _snapshot()
+    yield
+    after = _snapshot()
+    leaked = [f'{n}/{fn}' for n in _GUARDED for fn in sorted(after[n] - before[n])]
+    if leaked and not os.environ.get('UNICORNVIZ_ALLOW_STATE_WRITES'):
+        pytest.fail('Tests wrote into the owner\'s state directories:\n  '
+                    + '\n  '.join(leaked), pytrace=False)

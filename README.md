@@ -1,7 +1,7 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.29.1
+Version: 0.29.2
 Status: beta
 Last updated: 2026-09-05
 
@@ -101,6 +101,10 @@ Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
 
+- **0.29.2** — The playlists store and the tag-cache directory honor core's
+  `UNICORNVIZ_APP_ROOT`; the test conftest points it at a temp root and fails
+  the run if any test leaves a file in the real `runtime/` or `logs/`
+  (2026-09-05 system audit).
 - **0.29.1** — **The library load no longer freezes boot, and the tag cache
   can no longer be destroyed by a test run.** Two defects: (1) one shared
   `media_library_cache.json` was rewritten by *every* scan of *any*
