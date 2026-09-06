@@ -40,6 +40,9 @@ in the exact same format as the Spotify drop-in — no visual changes.
 
 - **Cross-fade** — `crossfade_ms` config key is reserved; backend support TBD
 - **Auto-mixing** — BPM-aware transition timing based on beat grid
+- **SQLite library store** — the library and playlists as a database
+  reconciled against the folder instead of rebuilt from it; designed in
+  [docs/upcoming-work.md](docs/upcoming-work.md) (item A, soon but not very)
 
 ## Hotkeys
 
