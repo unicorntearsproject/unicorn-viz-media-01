@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.29.2'
+__version__ = '0.29.3'
 
 import hashlib
 import json
@@ -345,9 +345,9 @@ def _scan_library(directory: Path) -> list[dict[str, Any]]:
     fresh: dict[str, dict[str, Any]] = {}
     found: list[tuple[Path, str, int, float]] = []
     try:
-        for root, _dirs, files in os.walk(directory):
+        for walk_dir, _dirs, files in os.walk(directory):
             for name in sorted(files):
-                p = Path(root) / name
+                p = Path(walk_dir) / name
                 if p.suffix.lower() not in _AUDIO_EXTS:
                     continue
                 try:

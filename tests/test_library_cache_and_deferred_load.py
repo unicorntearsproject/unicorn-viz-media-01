@@ -101,6 +101,37 @@ def test_warm_scan_reads_no_tags(tmp_path, monkeypatch):
     assert reads == 5                                         # second pass: cache hits only
 
 
+def test_warm_scan_reads_no_tags_when_the_library_has_subfolders(tmp_path, monkeypatch):
+    """2026-09-13 real-world miss: ``_scan_library`` computed the media root
+    into a local named ``root``, then reused that same name as the ``os.walk``
+    loop variable a few lines later.  With a flat library the walk visits
+    exactly one directory (the root itself) so the shadowing was invisible;
+    the instant the library has even one subfolder, ``root`` is left pointing
+    at the *last* subdirectory walked, the save path stops matching the load
+    path, and every boot reports 0 cached / N read forever.  A flat-only
+    fixture (see ``test_warm_scan_reads_no_tags`` above) cannot catch this --
+    this one must have a subfolder to be a real regression guard.
+    """
+    monkeypatch.setenv('UNICORNVIZ_MEDIA_CACHE_DIR', str(tmp_path / 'cache'))
+    lib = _lib(tmp_path, 'lib', 3)
+    (lib / 'vocals').mkdir()
+    (lib / 'vocals' / 'sub0.mp3').write_bytes(b'\x00' * 16)
+    (lib / 'vocals' / 'sub1.mp3').write_bytes(b'\x00' * 16)
+    reads = 0
+    real = _mc._read_tags
+
+    def counting(p):
+        nonlocal reads
+        reads += 1
+        return real(p)
+    monkeypatch.setattr(_mc, '_read_tags', counting)
+    _mc._scan_library(lib)
+    assert reads == 5
+    _mc._scan_library(lib)
+    assert reads == 5                                         # second pass: cache hits only
+    assert _mc._cache_path(_lib_root(tmp_path, 'lib')).exists()
+
+
 # -- deferred startup install -------------------------------------------------
 
 class _App:

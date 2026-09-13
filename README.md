@@ -1,9 +1,9 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.29.2
+Version: 0.29.3
 Status: beta
-Last updated: 2026-09-05
+Last updated: 2026-09-13
 
 `media-01` is a local audio playback subsystem for unicorn-viz.  It scans a
 directory of audio files, reads ID3/Vorbis/FLAC tags via `mutagen`, and plays
@@ -101,6 +101,16 @@ Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
 
+- **0.29.3** — Fixed a variable-shadowing bug in `_scan_library()`: the media
+  root computed for the tag cache and the `os.walk()` loop variable used the
+  same name, so on any library with at least one subfolder the cache was
+  saved under the digest of the *last* subdirectory walked instead of the
+  root — every boot missed 100% of the cache and re-read every tag (a
+  10,855-track library paid ~20-30s and a 0.8s main-thread stall per session,
+  every session). The 0.29.1 flat-library regression test could not catch
+  this since a walk with no subfolders never shadows; added
+  `test_warm_scan_reads_no_tags_when_the_library_has_subfolders`, confirmed
+  it fails against the pre-fix code (2026-09-13 system audit).
 - **0.29.2** — The playlists store and the tag-cache directory honor core's
   `UNICORNVIZ_APP_ROOT`; the test conftest points it at a temp root and fails
   the run if any test leaves a file in the real `runtime/` or `logs/`
