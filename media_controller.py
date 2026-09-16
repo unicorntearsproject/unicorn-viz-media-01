@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.29.3'
+__version__ = '0.30.0'
 
 import hashlib
 import json
@@ -327,7 +327,16 @@ def _save_tag_cache(root: Path, entries: dict[str, dict[str, Any]]) -> None:
         log.debug('media-01: tag cache not saved: %s', exc)
 
 
-def _scan_library(directory: Path) -> list[dict[str, Any]]:
+def _tag_workers_from_cfg(cfg: dict[str, Any] | None) -> int:
+    """``[media] tag_workers`` (threads reading tags on a scan), clamped 1..32."""
+    try:
+        raw = int((cfg or {}).get('tag_workers', _TAG_WORKERS) or _TAG_WORKERS)
+    except (TypeError, ValueError):
+        raw = _TAG_WORKERS
+    return max(1, min(32, raw))
+
+
+def _scan_library(directory: Path, workers: int = _TAG_WORKERS) -> list[dict[str, Any]]:
     """Walk *directory* and return a list of track metadata dicts.
 
     Tag reads dominate this scan (a 10.7k-track library spent ~15s in
@@ -380,7 +389,7 @@ def _scan_library(directory: Path) -> list[dict[str, Any]]:
             return key, meta
 
         try:
-            with ThreadPoolExecutor(max_workers=_TAG_WORKERS) as pool:
+            with ThreadPoolExecutor(max_workers=max(1, int(workers))) as pool:
                 for key, meta in pool.map(_one, stale):
                     fresh[key] = meta
         except Exception as exc:      # pool unavailable: plain sequential read
@@ -755,6 +764,52 @@ class MediaController:
     used internally.
     """
 
+
+    # -- Config editor (core `c`, Performance tab) ---------------------------
+    # Class-level so a controller built without __init__ (tests, tools) scans
+    # with the shipped default.
+    _tag_workers: int = _TAG_WORKERS
+    CONFIG_EDITOR_CATEGORY = 'Performance'
+    CONFIG_EDITOR_KEY = 'media'
+    CONFIG_EDITOR_TITLE = 'Media player'
+    _WINDOW_FPS_CHOICES = (10, 15, 20, 30, 50)
+    _TAG_WORKER_CHOICES = (2, 4, 8, 16)
+
+    def config_editor_settings(self) -> list[dict[str, object]]:
+        """Deck-window refresh (live) and tag-scan worker count (next launch)."""
+        interval = float(self._cfg.get('render_interval', 0.05) or 0.05)
+        fps = 1.0 / max(1e-6, interval)
+        fps_idx = min(range(len(self._WINDOW_FPS_CHOICES)),
+                      key=lambda i: abs(self._WINDOW_FPS_CHOICES[i] - fps))
+        workers = int(self._cfg.get('tag_workers', self._tag_workers) or self._tag_workers)
+        w_idx = min(range(len(self._TAG_WORKER_CHOICES)),
+                    key=lambda i: abs(self._TAG_WORKER_CHOICES[i] - workers))
+        return [
+            {'name': 'render_fps', 'label': 'Window refresh', 'kind': 'choice',
+             'choices': tuple(str(c) for c in self._WINDOW_FPS_CHOICES), 'value': fps_idx,
+             'hint': 'How often the deck window re-rasters (fps)'},
+            {'name': 'tag_workers', 'label': 'Tag scan workers', 'kind': 'choice',
+             'choices': tuple(str(c) for c in self._TAG_WORKER_CHOICES), 'value': w_idx,
+             'restart': 'media',
+             'hint': 'Threads reading tags on a library scan'},
+        ]
+
+    def set_config_setting(self, name: str, value: float) -> dict[str, object] | None:
+        """Apply a config-editor row (refresh live; workers at the next launch)."""
+        idx = int(round(float(value)))
+        if name == 'render_fps':
+            fps = self._WINDOW_FPS_CHOICES[max(0, min(len(self._WINDOW_FPS_CHOICES) - 1, idx))]
+            self._cfg['render_interval'] = 1.0 / float(fps)
+            window = getattr(self, '_window', None)
+            if window is not None:
+                window._interval = max(0.02, 1.0 / float(fps))  # noqa: SLF001 - owner of the window
+            return None
+        if name == 'tag_workers':
+            workers = self._TAG_WORKER_CHOICES[max(0, min(len(self._TAG_WORKER_CHOICES) - 1, idx))]
+            self._cfg['tag_workers'] = int(workers)
+            return {'tag_workers': int(workers)}
+        return None
+
     @staticmethod
     def _resolve_media_dir(cfg: dict[str, Any]) -> Path:
         """Resolve the media directory from config (or the bundled default)."""
@@ -786,7 +841,7 @@ class MediaController:
 
         def _scan() -> None:
             try:
-                tracks = _scan_library(media_dir)
+                tracks = _scan_library(media_dir, _tag_workers_from_cfg(cfg))
                 with _LIBRARY_SCAN_LOCK:
                     _LIBRARY_SCAN_CACHE.setdefault(key, tracks)
                 log.info('media-01: prescanned %d track(s) from %s',
@@ -801,6 +856,7 @@ class MediaController:
     def __init__(self, app: Any, cfg: dict[str, Any] | None = None) -> None:
         self._app = app
         self._cfg = dict(cfg or {})
+        self._tag_workers = _tag_workers_from_cfg(self._cfg)
 
         self.enabled: bool = bool(self._cfg.get('enabled', False))
 
@@ -1873,7 +1929,7 @@ class MediaController:
             with _LIBRARY_SCAN_LOCK:
                 cached = _LIBRARY_SCAN_CACHE.pop(key, None)
                 _LIBRARY_SCAN_PENDING.pop(key, None)
-        tracks = cached if cached is not None else _scan_library(self._media_dir)
+        tracks = cached if cached is not None else _scan_library(self._media_dir, self._tag_workers)
         self._install_library(tracks, shuffle=shuffle_after)
         return True
 
