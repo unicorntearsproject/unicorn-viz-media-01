@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.30.0'
+__version__ = '0.31.0'
 
 import hashlib
 import json
@@ -787,15 +787,24 @@ class MediaController:
         return [
             {'name': 'render_fps', 'label': 'Window refresh', 'kind': 'choice',
              'choices': tuple(str(c) for c in self._WINDOW_FPS_CHOICES), 'value': fps_idx,
+             'config': 'media.render_interval',
              'hint': 'How often the deck window re-rasters (fps)'},
             {'name': 'tag_workers', 'label': 'Tag scan workers', 'kind': 'choice',
              'choices': tuple(str(c) for c in self._TAG_WORKER_CHOICES), 'value': w_idx,
-             'restart': 'media',
+             'restart': 'media', 'config': 'media.tag_workers',
              'hint': 'Threads reading tags on a library scan'},
+            {'name': 'media_dir', 'label': 'Media folder', 'kind': 'text',
+             'value': str(self._cfg.get('media_dir', '') or ''), 'placeholder': '(bundled media)',
+             'restart': 'media', 'config': 'media.media_dir',
+             'hint': 'Folder the media library scans (a --media-dir flag still wins)'},
         ]
 
-    def set_config_setting(self, name: str, value: float) -> dict[str, object] | None:
-        """Apply a config-editor row (refresh live; workers at the next launch)."""
+    def set_config_setting(self, name: str, value: float | str) -> dict[str, object] | None:
+        """Apply a config-editor row (refresh live; workers and folder at the next launch)."""
+        if name == 'media_dir':
+            folder = str(value).strip()
+            self._cfg['media_dir'] = folder
+            return {'media_dir': folder}
         idx = int(round(float(value)))
         if name == 'render_fps':
             fps = self._WINDOW_FPS_CHOICES[max(0, min(len(self._WINDOW_FPS_CHOICES) - 1, idx))]

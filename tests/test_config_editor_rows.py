@@ -35,3 +35,13 @@ def test_rows_and_setters() -> None:
 
 def test_scan_library_takes_a_worker_count(tmp_path: Path) -> None:
     assert mc._scan_library(tmp_path, workers=1) == []
+
+
+def test_media_folder_row_restarts_and_names_its_config_line() -> None:
+    c = _ctrl()
+    c._cfg['media_dir'] = '~/Videos/vj'
+    rows = {r['name']: r for r in c.config_editor_settings()}
+    assert rows['media_dir']['kind'] == 'text' and rows['media_dir']['value'] == '~/Videos/vj'
+    assert rows['media_dir']['restart'] == 'media' and rows['media_dir']['config'] == 'media.media_dir'
+    assert rows['tag_workers']['config'] == 'media.tag_workers'
+    assert c.set_config_setting('media_dir', ' /mnt/media ') == {'media_dir': '/mnt/media'}

@@ -1,7 +1,7 @@
 # media-01 — Local Media Player
 
 Owner: Drop-in Maintainers
-Version: 0.30.0
+Version: 0.31.0
 Status: beta
 Last updated: 2026-09-13
 
@@ -101,6 +101,7 @@ Private repository: `https://github.com/iDoMeteor/unicorn-viz-media-01`
 
 ## Changelog
 
+- **0.31.0** — **Media folder** row on the config editor (next launch; a `--media-dir` flag still wins). The refresh and tag-worker rows now name their config lines, so values set in config.toml move into the menu.
 - **0.30.0** — Deck-window refresh (live) and tag-scan worker count (next launch, new `[media] tag_workers`) join the core config editor's Performance tab.
 - **0.29.3** — Fixed a variable-shadowing bug in `_scan_library()`: the media
   root computed for the tag cache and the `os.walk()` loop variable used the
