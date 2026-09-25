@@ -19,7 +19,7 @@ reserved for that feature and parsed but not yet acted upon.
 """
 from __future__ import annotations
 
-__version__ = '0.31.0'
+__version__ = '0.31.1'
 
 import hashlib
 import json
@@ -796,6 +796,7 @@ class MediaController:
             {'name': 'media_dir', 'label': 'Media folder', 'kind': 'text',
              'value': str(self._cfg.get('media_dir', '') or ''), 'placeholder': '(bundled media)',
              'restart': 'media', 'config': 'media.media_dir',
+             'tab': 'System', 'section': 'Folders',
              'hint': 'Folder the media library scans (a --media-dir flag still wins)'},
         ]
 

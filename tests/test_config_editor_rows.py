@@ -44,4 +44,6 @@ def test_media_folder_row_restarts_and_names_its_config_line() -> None:
     assert rows['media_dir']['kind'] == 'text' and rows['media_dir']['value'] == '~/Videos/vj'
     assert rows['media_dir']['restart'] == 'media' and rows['media_dir']['config'] == 'media.media_dir'
     assert rows['tag_workers']['config'] == 'media.tag_workers'
+    assert rows['media_dir']['tab'] == 'System' and rows['media_dir']['section'] == 'Folders'
+    assert 'tab' not in rows['tag_workers']              # a cost knob stays on Performance
     assert c.set_config_setting('media_dir', ' /mnt/media ') == {'media_dir': '/mnt/media'}
